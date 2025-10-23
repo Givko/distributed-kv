@@ -1,10 +1,13 @@
 use etherparse::{IpNumber, TcpHeaderSlice};
+use nix;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::Ipv4Addr;
+use std::os::fd::{AsRawFd, BorrowedFd, IntoRawFd};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::Duration;
 
 mod tcp;
 const SEND_QUEUE_SIZE: usize = 1024;
@@ -49,6 +52,14 @@ impl Drop for Interface {
 fn packet_run(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
     let mut buf = [0u8; 1504];
     loop {
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(nic.as_raw_fd()) };
+        let pfd = nix::poll::PollFd::new(borrowed_fd, nix::poll::PollFlags::POLLIN);
+        let n = nix::poll::poll(&mut [pfd], nix::poll::PollTimeout::from(1 as u8))?;
+        if n == 0 {
+            //eprintln!("Timer");
+            continue;
+        }
+
         let nbytes = nic.recv(&mut buf[..])?;
         match etherparse::Ipv4HeaderSlice::from_slice(&buf[..nbytes]) {
             Ok(iph) => {
@@ -83,18 +94,18 @@ fn packet_run(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
                                 }
                             }
                             Entry::Vacant(e) => {
-                                if let Some(pending) = cm.pending.get_mut(&tcp.destination_port()) {
-                                    if let Some(c) = tcp::Connection::accept(
+                                if let Some(pending) = cm.pending.get_mut(&tcp.destination_port())
+                                    && let Some(c) = tcp::Connection::accept(
                                         &mut nic,
                                         iph,
                                         tcp,
                                         &buf[data_index..nbytes],
-                                    )? {
-                                        e.insert(c);
-                                        pending.push_back(quad);
+                                    )?
+                                {
+                                    e.insert(c);
+                                    pending.push_back(quad);
 
-                                        ih.pending_var.notify_all();
-                                    }
+                                    ih.pending_var.notify_all();
                                 }
                             }
                         }
