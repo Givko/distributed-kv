@@ -1,32 +1,63 @@
-use std::collections::VecDeque;
+use std::sync::Arc;
 use std::vec::Vec;
+use std::{collections::VecDeque, sync::atomic::AtomicUsize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
         TcpListener,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
+    sync::OnceCell,
     sync::broadcast::{Receiver, Sender, error::RecvError},
 };
 
 #[tokio::main]
 async fn main() {
+    let connections_counter: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    const MAX_CONNECTIONS: usize = 1000;
     let listener = TcpListener::bind("127.0.0.1:8080")
         .await
         .expect("Unable to bind");
     let (snd, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
     loop {
-        let (stream, _) = listener.accept().await.expect("unable to accept");
+        let (mut stream, _) = listener.accept().await.expect("unable to accept");
         //connections.insert(stream_token, connection);
 
         eprintln!("accepted connetion");
+        if connections_counter.load(std::sync::atomic::Ordering::Relaxed) >= MAX_CONNECTIONS {
+            eprintln!("Too many concurrent connections");
+            stream.shutdown().await.expect("unable to shurdown stream");
+            continue;
+        }
+
+        connections_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        eprintln!(
+            "Counter is {}",
+            connections_counter.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        let once_cell = Arc::new(OnceCell::new());
         let (r, w) = stream.into_split();
-        tokio::spawn(read(r, snd.clone()));
-        tokio::spawn(write(w, snd.subscribe()));
+        tokio::spawn(read(
+            r,
+            snd.clone(),
+            connections_counter.clone(),
+            once_cell.clone(),
+        ));
+        tokio::spawn(write(
+            w,
+            snd.subscribe(),
+            connections_counter.clone(),
+            once_cell.clone(),
+        ));
     }
 }
 
-async fn write(mut write_stream: OwnedWriteHalf, mut rcv: Receiver<Vec<u8>>) {
+async fn write(
+    mut write_stream: OwnedWriteHalf,
+    mut rcv: Receiver<Vec<u8>>,
+    connections_counter: Arc<AtomicUsize>,
+    once_cell: Arc<OnceCell<usize>>,
+) {
     let mut write_buf: VecDeque<u8> = VecDeque::new();
     loop {
         match rcv.recv().await {
@@ -58,12 +89,25 @@ async fn write(mut write_stream: OwnedWriteHalf, mut rcv: Receiver<Vec<u8>>) {
             }
             Err(_) => {
                 eprintln!("Failed unexpectedly");
+                break;
             }
         }
     }
+    let counter = once_cell
+        .get_or_init(async || {
+            eprintln!("decremented counter");
+            connections_counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+        })
+        .await;
+    eprintln!("Counter is now {}", counter);
 }
 
-async fn read(mut read_stream: OwnedReadHalf, sender: Sender<Vec<u8>>) {
+async fn read(
+    mut read_stream: OwnedReadHalf,
+    sender: Sender<Vec<u8>>,
+    connections_counter: Arc<AtomicUsize>,
+    once_cell: Arc<OnceCell<usize>>,
+) {
     println!("started reading");
     let mut read_buf = VecDeque::new();
     let mut messages: Vec<u8> = Vec::new();
@@ -76,7 +120,10 @@ async fn read(mut read_stream: OwnedReadHalf, sender: Sender<Vec<u8>>) {
             println!("Closed connection");
             break;
         }
-
+        if n == 1 {
+            println!("only empty line");
+            continue;
+        }
         // Append newly read bytes
         read_buf.extend(&buf[..n]);
         eprintln!("Read {} bytes", n);
@@ -108,4 +155,12 @@ async fn read(mut read_stream: OwnedReadHalf, sender: Sender<Vec<u8>>) {
         eprintln!("Send all message bytes {}", messages.len());
         messages.clear();
     }
+    let counter = once_cell
+        .get_or_init(async || {
+            eprintln!("decremented counter");
+            connections_counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+        })
+        .await;
+
+    eprintln!("Counter is now {}", counter);
 }
