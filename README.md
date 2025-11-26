@@ -1,4 +1,3 @@
-78% of storage used … If you run out of space, you can't save to Drive or back up Google Photos.
 # The MAANG Systems Engineer Study Plan
 **48 Weeks → Senior/Staff Engineer Readiness**
 
