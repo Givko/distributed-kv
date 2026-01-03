@@ -1,209 +1,166 @@
-use mio::net::{TcpListener, TcpStream};
-use mio::{Events, Interest, Poll, Token};
-use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
-use std::time::Duration;
+use std::sync::Arc;
+use std::vec::Vec;
+use std::{collections::VecDeque, sync::atomic::AtomicUsize};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{
+        TcpListener,
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+    },
+    sync::OnceCell,
+    sync::broadcast::{Receiver, Sender, error::RecvError},
+};
 
-struct ClientConnection {
-    stream: TcpStream,
-    read_buf: VecDeque<u8>,
-    write_buf: VecDeque<u8>,
+#[tokio::main]
+async fn main() {
+    let connections_counter: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    const MAX_CONNECTIONS: usize = 1000;
+    let listener = TcpListener::bind("127.0.0.1:8080")
+        .await
+        .expect("Unable to bind");
+    let (snd, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
+    loop {
+        let (mut stream, _) = listener.accept().await.expect("unable to accept");
+        //connections.insert(stream_token, connection);
+
+        eprintln!("accepted connetion");
+        if connections_counter.load(std::sync::atomic::Ordering::Relaxed) >= MAX_CONNECTIONS {
+            eprintln!("Too many concurrent connections");
+            stream.shutdown().await.expect("unable to shurdown stream");
+            continue;
+        }
+
+        connections_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        eprintln!(
+            "Counter is {}",
+            connections_counter.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        let once_cell = Arc::new(OnceCell::new());
+        let (r, w) = stream.into_split();
+        tokio::spawn(read(
+            r,
+            snd.clone(),
+            connections_counter.clone(),
+            once_cell.clone(),
+        ));
+        tokio::spawn(write(
+            w,
+            snd.subscribe(),
+            connections_counter.clone(),
+            once_cell.clone(),
+        ));
+    }
 }
 
-fn main() {
-    let mut poll = Poll::new().unwrap();
-    let mut events = Events::with_capacity(1024);
-    let mut listener =
-        TcpListener::bind("127.0.0.1:8080".parse().unwrap()).expect("Unable to bind");
-    let listener_token = Token(0);
-
-    poll.registry()
-        .register(&mut listener, listener_token, Interest::READABLE)
-        .expect("Failed to register listener");
-
-    let mut connections: HashMap<Token, ClientConnection> = HashMap::new();
-    let mut next_token_id = 1;
+async fn write(
+    mut write_stream: OwnedWriteHalf,
+    mut rcv: Receiver<Vec<u8>>,
+    connections_counter: Arc<AtomicUsize>,
+    once_cell: Arc<OnceCell<usize>>,
+) {
+    let mut write_buf: VecDeque<u8> = VecDeque::new();
     loop {
-        poll.poll(&mut events, Some(Duration::from_millis(100)))
-            .expect("Failed to poll");
+        match rcv.recv().await {
+            Ok(bytes) => {
+                write_buf.extend(&bytes);
 
-        for event in events.iter() {
-            match event.token() {
-                Token(0) => {
-                    // Listener - accept connections
-                    if !event.is_readable() {
-                        continue;
+                // Get contiguous slice of write buffer
+                let buf = write_buf.make_contiguous();
+                match write_stream.write(buf).await {
+                    Ok(0) => {
+                        break;
                     }
+                    Ok(n) => {
+                        // Wrote n bytes - remove from buffer
+                        println!("Wrote {} bytes to", n);
 
-                    loop {
-                        match listener.accept() {
-                            Ok((mut stream, addr)) => {
-                                println!("Accepted connection from {}", addr);
-
-                                let stream_token = Token(next_token_id);
-                                next_token_id += 1;
-
-                                poll.registry()
-                                    .register(&mut stream, stream_token, Interest::READABLE)
-                                    .expect("Failed to register stream");
-
-                                let connection = ClientConnection {
-                                    stream,
-                                    read_buf: VecDeque::new(),
-                                    write_buf: VecDeque::new(),
-                                };
-                                connections.insert(stream_token, connection);
-
-                                println!("Registered client with {:?}", stream_token);
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                break;
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to accept: {}", e);
-                                break;
-                            }
-                        }
+                        write_buf.drain(..n);
+                        // Continue loop - might have more to write
+                    }
+                    Err(_) => {
+                        break;
                     }
                 }
-                other_token => {
-                    // Client event
-                    if event.is_readable() {
-                        let connection = connections
-                            .get_mut(&other_token)
-                            .expect("Connection not found");
-
-                        // Read loop (edge-triggered)
-                        let mut messages: Vec<u8> = Vec::new();
-                        loop {
-                            let mut buf = [0u8; 4096];
-
-                            match connection.stream.read(&mut buf) {
-                                Ok(0) => {
-                                    // Connection closed
-                                    println!("Client {:?} disconnected", other_token);
-
-                                    poll.registry()
-                                        .deregister(&mut connection.stream)
-                                        .expect("Failed to deregister");
-
-                                    connections.remove(&other_token);
-                                    break;
-                                }
-                                Ok(n) => {
-                                    // Append newly read bytes
-                                    connection.read_buf.extend(&buf[..n]);
-
-                                    // Find last newline
-                                    let last_newline =
-                                        connection.read_buf.iter().rposition(|&b| b == b'\n');
-                                    match last_newline {
-                                        Some(pos) => {
-                                            // Extract all complete messages
-                                            let message: Vec<u8> =
-                                                connection.read_buf.drain(..(pos + 1)).collect();
-                                            messages.extend(message);
-
-                                            // Broadcast to all other clients
-                                            println!(
-                                                "Broadcast {} bytes from {:?}",
-                                                messages.len(),
-                                                other_token,
-                                            );
-                                        }
-                                        None => {
-                                            println!(
-                                                "Buffering partial message from {:?}",
-                                                other_token
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    break;
-                                }
-                                Err(e) => {
-                                    eprintln!("Read error: {}", e);
-                                    break;
-                                }
-                            }
-                        }
-
-                        if messages.is_empty() {
-                            continue;
-                        }
-
-                        for (token, conn) in connections.iter_mut() {
-                            if *token == other_token {
-                                continue;
-                            }
-
-                            conn.write_buf.extend(&messages);
-
-                            poll.registry()
-                                .reregister(
-                                    &mut conn.stream,
-                                    *token,
-                                    Interest::READABLE | Interest::WRITABLE,
-                                )
-                                .expect("Failed to reregister");
-                        }
-                    }
-                    if event.is_writable() {
-                        let connection = connections
-                            .get_mut(&other_token)
-                            .expect("Connection not found");
-
-                        // Write loop (edge-triggered - drain until WouldBlock)
-                        loop {
-                            if connection.write_buf.is_empty() {
-                                // Nothing left to write - reregister for READABLE only
-                                poll.registry()
-                                    .reregister(
-                                        &mut connection.stream,
-                                        other_token,
-                                        Interest::READABLE,
-                                    )
-                                    .expect("Failed to reregister");
-                                break;
-                            }
-
-                            // Get contiguous slice of write buffer
-                            let buf = connection.write_buf.make_contiguous();
-
-                            match connection.stream.write(buf) {
-                                Ok(0) => {
-                                    // Socket closed
-                                    println!("Client {:?} closed during write", other_token);
-
-                                    poll.registry()
-                                        .deregister(&mut connection.stream)
-                                        .expect("Failed to deregister");
-
-                                    connections.remove(&other_token);
-                                    break;
-                                }
-                                Ok(n) => {
-                                    // Wrote n bytes - remove from buffer
-                                    println!("Wrote {} bytes to {:?}", n, other_token);
-
-                                    connection.write_buf.drain(..n);
-                                    // Continue loop - might have more to write
-                                }
-                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    // Socket not ready - will get another WRITABLE event
-                                    println!("Write would block for {:?}", other_token);
-                                    break;
-                                }
-                                Err(e) => {
-                                    eprintln!("Write error for {:?}: {}", other_token, e);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
+                eprintln!("Recieved {} bytes", bytes.len());
+            }
+            Err(RecvError::Closed) => {
+                eprintln!("Sender close");
+                break;
+            }
+            Err(_) => {
+                eprintln!("Failed unexpectedly");
+                break;
             }
         }
     }
+    let counter = once_cell
+        .get_or_init(async || {
+            eprintln!("decremented counter");
+            connections_counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+        })
+        .await;
+    eprintln!("Counter is now {}", counter);
+}
+
+async fn read(
+    mut read_stream: OwnedReadHalf,
+    sender: Sender<Vec<u8>>,
+    connections_counter: Arc<AtomicUsize>,
+    once_cell: Arc<OnceCell<usize>>,
+) {
+    println!("started reading");
+    let mut read_buf = VecDeque::new();
+    let mut messages: Vec<u8> = Vec::new();
+    loop {
+        let mut buf = [0u8; 1024];
+        let n = read_stream.read(&mut buf).await.expect("Unable to read");
+
+        // 0 bytes means connection closed
+        if n == 0 {
+            println!("Closed connection");
+            break;
+        }
+        if n == 1 {
+            println!("only empty line");
+            continue;
+        }
+        // Append newly read bytes
+        read_buf.extend(&buf[..n]);
+        eprintln!("Read {} bytes", n);
+
+        // Find last newline
+        let last_newline = read_buf.iter().rposition(|&b| b == b'\n');
+        match last_newline {
+            Some(pos) => {
+                // Extract all complete messages
+                let message: Vec<u8> = read_buf.drain(..(pos + 1)).collect();
+                messages.extend(message);
+
+                // Broadcast to all other clients
+                println!("Broadcast {} bytes from {:?}", messages.len(), n);
+            }
+            None => {
+                println!("Buffering partial message from ");
+            }
+        }
+
+        if messages.is_empty() {
+            continue;
+        }
+
+        sender
+            .send(messages.clone())
+            .expect("Unable to send messages");
+
+        eprintln!("Send all message bytes {}", messages.len());
+        messages.clear();
+    }
+    let counter = once_cell
+        .get_or_init(async || {
+            eprintln!("decremented counter");
+            connections_counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+        })
+        .await;
+
+    eprintln!("Counter is now {}", counter);
 }
