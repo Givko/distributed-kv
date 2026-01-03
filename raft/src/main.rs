@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use rand::Rng;
+use raft::raft_client::RaftClient;
 use raft::raft_server::{Raft, RaftServer};
 use raft::{AppendEntriesMessage, AppendEntriesReply, RequestVoteMessage, RequestVoteReply};
 use tokio::sync::RwLock;
@@ -19,6 +20,9 @@ struct Args {
     // Port the node will use
     #[arg(short, long)]
     port: usize,
+
+    #[arg(short, long, num_args = 1.., value_delimiter = ',')]
+    nodes: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -30,23 +34,18 @@ pub struct RaftService {
 #[derive(Debug, PartialEq, Eq)]
 enum State {
     Candidate {
-        voted_for: usize,
         votes: usize,
     },
     Leader,
     Follower {
         leader: String,
-        current_timer: Duration,
     },
 }
 
 impl Default for State {
     fn default() -> Self {
-        let mut rng = rand::rng();
-        let duration  = rng.random_range(150..300);
         State::Follower {
             leader: String::new(),
-            current_timer: Duration::from_millis(duration),
         }
     }
     
@@ -56,11 +55,26 @@ impl Default for State {
 struct Node {
     current_term: usize,
     state: State,
+    peers: Vec<String>,
 }
 
 impl Node {
     fn is_leader(&self) -> bool {
         self.state == State::Leader
+    }
+
+    fn is_candidate(&self) -> bool {
+        match self.state {
+            State::Candidate { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn is_follower(&self) -> bool {
+        match self.state {
+            State::Follower { .. } => true,
+            _ => false,
+        }
     }
 }
 
@@ -98,21 +112,29 @@ impl Raft for RaftService {
 }
 
 impl RaftService {
-    fn new(snd: Sender<()>) -> Self {
+    fn new(snd: Sender<()>, peers: Vec<String>) -> Self {
+        let node: Node = Node {
+            current_term: 0,
+            state: State::default(),
+            peers,
+        };
+
         RaftService {
-            node: Arc::new(RwLock::new(Node::default())),
+            node: Arc::new(RwLock::new(node)),
             elect_timer_reset_tx: snd,
         }
     }
 }
 
-async fn election_timer(mut node: Arc<RwLock<Node>>, mut reset_rx: Receiver<()>) {
+async fn election_timer(node: Arc<RwLock<Node>>, mut reset_rx: Receiver<()>) {
     loop {
-        let duration = rand::rng().random_range(150..300);
-        let timeout_duration = Duration::from_millis(duration);
+        let duration: u64 = rand::rng().random_range(150..300);
+        let timeout_duration: Duration = Duration::from_millis(duration);
 
         if node.read().await.is_leader() {
             // If we're the leader, we don't need to run the election timer
+            eprintln!("Node is leader, skipping election timer");
+            tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
 
@@ -120,7 +142,6 @@ async fn election_timer(mut node: Arc<RwLock<Node>>, mut reset_rx: Receiver<()>)
             _ = tokio::time::sleep(timeout_duration) => {
                 // Election timeout elapsed, start a new election
                 //eprintln!("Election timeout elapsed, starting new election");
-                // Here you would typically transition to Candidate state and start the election process
             }
             _ = reset_rx.recv() => {
                 // Received a reset signal, restart the timer
@@ -132,19 +153,43 @@ async fn election_timer(mut node: Arc<RwLock<Node>>, mut reset_rx: Receiver<()>)
     }
 }
 
+async fn election_process(node: Arc<RwLock<Node>>) {
+    eprintln!("Starting election process");
+    {
+        let mut node_guard = node.write().await;
+        node_guard.current_term += 1;
+        node_guard.state = State::Candidate { votes: 1 };
+    }
+
+    //TODO: Send requestVote to all other nodes
+
+    // Before counting votes, check if we became leader already
+    if node.read().await.is_leader() || node.read().await.is_follower() {
+        eprintln!("Node became leader or follower during election, aborting election process");
+        return;
+    }
+
+    //TODO: Count votes and become leader if majority is reached
+    {
+        // take write lock
+        // count votes
+        // if majority, become leader
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     eprintln!("{}", args.port);
+    eprintln!("{:?}", args.nodes);
 
-    let addr = "127.0.0.1:5050".parse()?;
+    let addr = format!("127.0.0.1:{}", args.port).parse()?;
     let (snd, rcv) = tokio::sync::mpsc::channel::<()>(1);
-    let raft = RaftService::new(snd);
+    let raft = RaftService::new(snd, args.nodes);
 
-    let election_timer = tokio::spawn(election_timer(
+    _ = tokio::spawn(election_timer(
         raft.node.clone(), 
         rcv
-        /* reset_rx */,
     ));
     
     Server::builder()
