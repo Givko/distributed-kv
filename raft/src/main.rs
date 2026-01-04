@@ -8,6 +8,7 @@ use raft::raft_server::{Raft, RaftServer};
 use raft::{AppendEntriesMessage, AppendEntriesReply, RequestVoteMessage, RequestVoteReply};
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::task::JoinHandle;
 use tonic::{Request, Response, Status, transport::Server};
 
 pub mod raft {
@@ -146,6 +147,8 @@ async fn election_timer(node: Arc<RwLock<Node>>, mut reset_rx: Receiver<()>) {
             _ = reset_rx.recv() => {
                 // Received a reset signal, restart the timer
                 eprintln!("Election timer reset");
+                //election_process(node.clone()).await;
+                election_process(node.clone()).await;
                 continue;
             }
         }
@@ -162,7 +165,43 @@ async fn election_process(node: Arc<RwLock<Node>>) {
     }
 
     //TODO: Send requestVote to all other nodes
+    let mut join_handles: Vec<JoinHandle<Result<Response<RequestVoteReply>, Status>>> = vec![];
+    let cur_term = node.read().await.current_term;
 
+    //TODO: borrow dont clone if possible to void performance hit
+    let peers = node.read().await.peers.clone();
+    for peer in peers {
+        eprintln!("Sending requestVote to {}", peer);
+        let mut peer_client = RaftClient::connect(format!("http://{}", peer)).await.expect("Failed to connect to peer");
+        let vote_request = Request::new(RequestVoteMessage {
+            term: cur_term as u64,
+            candidate_id: 1,
+        });
+
+        let handle: JoinHandle<Result<Response<RequestVoteReply>, Status>> = tokio::spawn(async move {
+            let vote_reply = peer_client.request_vote(vote_request).await;
+            eprintln!("Got vote reply from {}: {:?}", peer, vote_reply);
+            vote_reply
+        });
+
+        join_handles.push(handle);
+    }
+
+    let mut votes = vec![];
+    for handle in join_handles {
+        match handle.await {
+            Ok(Ok(vote_reply)) => {
+                votes.push(vote_reply.into_inner());
+            }
+            Ok(Err(e)) => {
+                eprintln!("Error getting vote reply: {}", e);
+            }
+            Err(e) => {
+                eprintln!("Join error: {}", e);
+            } 
+        }
+    }
+    
     // Before counting votes, check if we became leader already
     if node.read().await.is_leader() || node.read().await.is_follower() {
         eprintln!("Node became leader or follower during election, aborting election process");
@@ -170,6 +209,10 @@ async fn election_process(node: Arc<RwLock<Node>>) {
     }
 
     //TODO: Count votes and become leader if majority is reached
+    for vote in votes {
+        eprintln!("Vote: {:?}", vote);
+    }
+
     {
         // take write lock
         // count votes
