@@ -28,7 +28,7 @@ struct Args {
 
 #[derive(Debug)]
 pub struct RaftService {
-    node: Arc<RwLock<Node>>,
+    mailbox: Sender<RaftMsg>,
     elect_timer_reset_tx: Sender<()>,
 }
 
@@ -40,17 +40,91 @@ enum State {
     Follower,
 }
 
+enum RaftMsg {
+    RequestVote {
+        vote_request: RequestVoteMessage, 
+        reply_channel: tokio::sync::oneshot::Sender<RequestVoteReply>
+    },
+    AppendEntries {
+        append_request: AppendEntriesMessage,
+        reply_channel: tokio::sync::oneshot::Sender<AppendEntriesReply>,
+    },
+}
+
 #[derive(Debug)]
 struct Node {
     current_term: usize,
     state: State,
     peers: Vec<String>,
     voted_for: bool, 
-    elect_timer_reset_tx: Sender<()>,
     election_handle: Option<JoinHandle<()>>,
 }
 
 impl Node {
+
+    async fn run(mut self, mut inbox: Receiver<RaftMsg>) {
+        while let Some(msg) = inbox.recv().await {
+            match msg {
+                RaftMsg::RequestVote { vote_request, reply_channel } => {
+                    eprintln!("Got requestVote in node");
+
+                    if self.current_term < vote_request.term as usize {
+                        self.current_term = vote_request.term as usize;
+                        self.voted_for = false;
+                        self.state = State::Follower;
+                    }
+
+                    if self.voted_for || self.current_term > vote_request.term as usize {
+                        let vote = RequestVoteReply {
+                            term: self.current_term as u64,
+                            vote: false,
+                        };
+
+                        reply_channel.send(vote).expect("Failed to send vote reply");
+                        return; 
+                    }
+
+                    let vote_reply = RequestVoteReply {
+                        term: self.current_term as u64,
+                        vote: true,
+                    };
+
+                    self.current_term = vote_request.term as usize;
+                    self.voted_for = true;
+                    self.state = State::Follower;
+
+                    reply_channel.send(vote_reply).expect("Failed to send vote reply");
+                }
+                RaftMsg::AppendEntries {append_request, reply_channel} => {
+                    if self.current_term > append_request.term as usize {
+                        let vote = AppendEntriesReply {
+                            term: self.current_term as u64,
+                            success: false,
+                        };
+
+                        reply_channel.send(vote).expect("Failed to send append entries reply not successful");
+                        return;
+                    }
+
+                    let reply = AppendEntriesReply {
+                        term: self.current_term as u64,
+                        success: true,
+                    };
+
+                    self.state = State::Follower;
+
+                    // Reset voted_for on receiving heartbeat
+                    if self.current_term < reply.term as usize {
+                        self.current_term = reply.term as usize;
+                        self.voted_for = false;
+                    }
+
+                    reply_channel.send(reply).expect("Failed to send append entries reply");
+                }
+            }
+        }
+    }
+
     fn is_leader(&self) -> bool {
         self.state == State::Leader
     }
@@ -70,35 +144,16 @@ impl Raft for RaftService {
         &self,
         request: Request<RequestVoteMessage>,
     ) -> Result<Response<RequestVoteReply>, Status> {
-        eprintln!("Got requestVote");
-
-        let vote_request = request.into_inner();
-
-        let mut node_guard = self.node.write().await;
-        if node_guard.current_term < vote_request.term as usize {
-            node_guard.current_term = vote_request.term as usize;
-            node_guard.voted_for = false;
-            node_guard.state = State::Follower;
-        }
-
-        if node_guard.voted_for || node_guard.current_term > vote_request.term as usize {
-            let vote = RequestVoteReply {
-                term: node_guard.current_term as u64,
-                vote: false,
-            };
-
-            return Ok(Response::new(vote));
-        }
-
-        let vote_reply = RequestVoteReply {
-            term: node_guard.current_term as u64,
-            vote: true,
+        
+        let (snd, rcv) = tokio::sync::oneshot::channel::<RequestVoteReply>();
+        let vote_message = RaftMsg::RequestVote {
+            vote_request: request.into_inner(),
+            reply_channel: snd,
         };
 
-        node_guard.current_term = vote_request.term as usize;
-        node_guard.voted_for = true;
-        node_guard.state = State::Follower;
-
+        self.mailbox.send(vote_message).await.expect("Failed to send vote message");
+        let vote_reply = rcv.await.expect("Failed to receive vote reply");
+        
         Ok(Response::new(vote_reply))
     }
 
@@ -106,55 +161,30 @@ impl Raft for RaftService {
         &self,
         request: Request<AppendEntriesMessage>,
     ) -> Result<Response<AppendEntriesReply>, Status> {
-        let reply = request.into_inner();
-        let mut node_guard = self.node.write().await;
-        if node_guard.current_term > reply.term as usize {
-            let vote = AppendEntriesReply {
-                term: node_guard.current_term as u64,
-                success: false,
-            };
-
-            return Ok(Response::new(vote));
-        }
-
-        let reply = AppendEntriesReply {
-            term: node_guard.current_term as u64,
-            success: true,
+        let message= request.into_inner();
+        let (snd, rcv) = tokio::sync::oneshot::channel::<AppendEntriesReply>();
+        let append_message = RaftMsg::AppendEntries {
+            append_request: message,
+            reply_channel: snd,
         };
-
-        self.elect_timer_reset_tx.send(()).await.unwrap();
-        node_guard.state = State::Follower;
-
-        // Reset voted_for on receiving heartbeat
-
-        if node_guard.current_term < reply.term as usize {
-            node_guard.current_term = reply.term as usize;
-            node_guard.voted_for = false;
-        }
+        self.mailbox.send(append_message).await.expect("Failed to send append entries message");
+        let reply = rcv.await.expect("Failed to receive append entries reply");
+        self.elect_timer_reset_tx.send(()).await.expect("Failed to send election timer reset");
 
         Ok(Response::new(reply))
     }
 }
 
 impl RaftService {
-    fn new(snd: Sender<()>, peers: Vec<String>) -> Self {
-        let node: Node = Node {
-            current_term: 0,
-            state: State::default(),
-            peers,
-            voted_for: false,
-            elect_timer_reset_tx: snd.clone(),
-            election_handle: None,
-        };
-
+    fn new(elect_timer_reset_tx: Sender<()>, mailbox: Sender<RaftMsg>) -> Self {
         RaftService {
-            node: Arc::new(RwLock::new(node)),
-            elect_timer_reset_tx: snd,
+            mailbox, 
+            elect_timer_reset_tx,
         }
     }
 }
 
-async fn election_timer(node: Arc<RwLock<Node>>, mut reset_rx: Receiver<()>) {
+async fn election_timer(raft_service: RaftService, mut reset_rx: Receiver<()>) {
     loop {
         let duration: u64 = rand::rng().random_range(150..300);
         let timeout_duration: Duration = Duration::from_millis(duration);
@@ -232,7 +262,6 @@ async fn election_process(node: Arc<RwLock<Node>>) {
     eprintln!("Current node state: {:?}", node.read().await.state);
     let mut join_handles: Vec<JoinHandle<Result<Response<RequestVoteReply>, Status>>> = vec![];
     let cur_term = node.read().await.current_term;
-
     //TODO: borrow dont clone if possible to void performance hit
     let peers = node.read().await.peers.clone();
     for peer in peers {
@@ -309,12 +338,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("{:?}", args.nodes);
 
     let addr = format!("127.0.0.1:{}", args.port).parse()?;
-    let (snd, rcv) = tokio::sync::mpsc::channel::<()>(1);
-    let raft = RaftService::new(snd, args.nodes);
+    let (elect_rst_sn, elect_rst_rcv) = tokio::sync::mpsc::channel::<()>(1);
+    let (mailbox_snd, mailbox_rcv) = tokio::sync::mpsc::channel::<RaftMsg>(100);
+    let raft = RaftService::new(elect_rst_sn,mailbox_snd);
 
+    let node: Node = Node {
+        current_term: 0,
+        state: State::default(),
+        peers:args.nodes,
+        voted_for: false,
+        election_handle: None,
+    };
+
+    _ = tokio::spawn(async move { node.run(mailbox_rcv).await });
     _ = tokio::spawn(election_timer(
-        raft.node.clone(), 
-        rcv
+        raft, 
+        elect_rst_rcv
     ));
     
     Server::builder()
