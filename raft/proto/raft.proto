@@ -8,7 +8,6 @@ service Raft {
 
 message RequestVoteMessage {
   uint64 term          = 1;
-  uint32 candidateId   = 2;
 }
 
 message RequestVoteReply {
@@ -18,7 +17,6 @@ message RequestVoteReply {
 
 message AppendEntriesMessage {
   uint64 term          = 1;
-  uint32 leaderId      = 2;
 }
 
 message AppendEntriesReply {
