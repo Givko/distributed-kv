@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
@@ -6,9 +5,7 @@ use rand::Rng;
 use raft::raft_client::RaftClient;
 use raft::raft_server::{Raft, RaftServer};
 use raft::{AppendEntriesMessage, AppendEntriesReply, RequestVoteMessage, RequestVoteReply};
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::task::JoinHandle;
 use tonic::{Request, Response, Status, transport::Server};
 
 pub mod raft {
@@ -29,25 +26,33 @@ struct Args {
 #[derive(Debug)]
 pub struct RaftService {
     mailbox: Sender<RaftMsg>,
-    elect_timer_reset_tx: Sender<()>,
 }
 
-#[derive(Debug, PartialEq, Eq, Default)]
+#[derive(Debug, PartialEq, Eq, Default, Clone, Copy)]
 enum State {
-    Candidate,
+    Candidate {
+        votes: usize,
+    },
     Leader,
     #[default]
     Follower,
 }
 
 enum RaftMsg {
-    RequestVote {
+    RequestVoteReply {
+        vote_reply: RequestVoteReply,
+        reply_channel: tokio::sync::oneshot::Sender<()>,
+    },
+    HandleVoteRequest {
         vote_request: RequestVoteMessage, 
         reply_channel: tokio::sync::oneshot::Sender<RequestVoteReply>
     },
-    AppendEntries {
+    EntriesAppended {
         append_request: AppendEntriesMessage,
         reply_channel: tokio::sync::oneshot::Sender<AppendEntriesReply>,
+    },
+    NewLeader{
+        leader_term: usize,
     },
 }
 
@@ -57,80 +62,206 @@ struct Node {
     state: State,
     peers: Vec<String>,
     voted_for: bool, 
-    election_handle: Option<JoinHandle<()>>,
 }
 
 impl Node {
+    async fn run(mut self, mut inbox: Receiver<RaftMsg>, mailbox_sender: Sender<RaftMsg>) {
+        loop{
 
-    async fn run(mut self, mut inbox: Receiver<RaftMsg>) {
-        while let Some(msg) = inbox.recv().await {
-            match msg {
-                RaftMsg::RequestVote { vote_request, reply_channel } => {
-                    eprintln!("Got requestVote in node");
+            let mut duration: u64 = rand::rng().random_range(150..300);
+            if self.is_leader() {
+                duration = 50;
+            }
 
-                    if self.current_term < vote_request.term as usize {
-                        self.current_term = vote_request.term as usize;
-                        self.voted_for = false;
-                        self.state = State::Follower;
+            tokio::select! {
+                Some(msg) = inbox.recv() => {
+                    self.handle_message(msg).await;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(duration)) => {
+                    if self.is_leader() {
+                        for peer in self.peers.clone() {
+                            // If we're the leader, we don't need to run the election timer
+                            let current_term = self.current_term;
+                            let append_entries_request = Request::new(AppendEntriesMessage {
+                                term: self.current_term as u64,
+                            });
+
+                            if let Ok(mut peer_client) = RaftClient::connect(format!("http://{}", peer)).await {
+                                let inbox_sender = mailbox_sender.clone();
+                                tokio::spawn(async move {
+                                    if let Ok(reply) = peer_client.append_entries(append_entries_request).await {
+                                        let reply_inner = reply.into_inner();
+                                        if reply_inner.success {
+                                            eprintln!("Heartbeat acknowledged by {}", peer);
+                                            return;
+                                        } 
+
+                                        eprintln!("Heartbeat rejected by {}", peer);
+                                        if reply_inner.term as usize > current_term {
+                                            let new_leader_msg = RaftMsg::NewLeader {
+                                                leader_term: reply_inner.term as usize,
+                                            };
+                                            inbox_sender.send(new_leader_msg).await.expect("Failed to send new leader message");
+                                        }
+                                    } 
+                                });
+                            }
+                        }
+
+                        continue;
                     }
 
-                    if self.voted_for || self.current_term > vote_request.term as usize {
-                        let vote = RequestVoteReply {
-                            term: self.current_term as u64,
-                            vote: false,
+                    eprintln!("Election timeout, starting election");
+
+                
+                    self.current_term += 1;
+                    self.state = State::Candidate { votes: 1 }; // vote for self
+                    self.voted_for = true;
+
+                    eprintln!("Current node state: {:?}", self.state);
+                    let cur_term = self.current_term;
+                    let peers = self.peers.clone();
+                    for peer in peers {
+                        eprintln!("Sending requestVote to {}", peer);
+                        let vote_request = RequestVoteMessage {
+                            term: cur_term as u64
                         };
-
-                        reply_channel.send(vote).expect("Failed to send vote reply");
-                        return; 
+                        let request = Request::new(vote_request);
+                        let mailbox_sender = mailbox_sender.clone();
+                        tokio::spawn(async move {
+                            if let Ok(mut peer_client) = RaftClient::connect(format!("http://{}", peer)).await {
+                                let vote_reply = peer_client.request_vote(request).await.expect("Failed to send request vote");
+                                let vote_reply_inner = vote_reply.into_inner();
+                                let (snd, rcv) = tokio::sync::oneshot::channel::<()>();
+                                let vote_reply_message = RaftMsg::RequestVoteReply {
+                                    vote_reply: vote_reply_inner,
+                                    reply_channel: snd,
+                                };
+                                mailbox_sender.send(vote_reply_message).await.expect("Failed to send vote reply to node");
+                                rcv.await.expect(format!("Failed to receive ack for vote reply for peer {peer}").as_str());
+                            }
+                        });
                     }
+                }
+            }
+            
+        }
+    }
 
-                    let vote_reply = RequestVoteReply {
+    async fn handle_message(&mut self, msg: RaftMsg) {
+        match msg {
+            RaftMsg::HandleVoteRequest { vote_request, reply_channel } => {
+                eprintln!("Got requestVote in node");
+
+                if self.current_term < vote_request.term as usize {
+                    self.current_term = vote_request.term as usize;
+                    self.voted_for = false;
+                    self.state = State::Follower;
+                }
+
+                if self.voted_for || self.current_term > vote_request.term as usize {
+                    let vote = RequestVoteReply {
                         term: self.current_term as u64,
-                        vote: true,
+                        vote: false,
                     };
 
-                    self.current_term = vote_request.term as usize;
-                    self.voted_for = true;
-                    self.state = State::Follower;
-
-                    reply_channel.send(vote_reply).expect("Failed to send vote reply");
+                    reply_channel.send(vote).expect("Failed to send vote reply");
+                    return; 
                 }
-                RaftMsg::AppendEntries {append_request, reply_channel} => {
-                    if self.current_term > append_request.term as usize {
-                        let vote = AppendEntriesReply {
-                            term: self.current_term as u64,
-                            success: false,
-                        };
 
-                        reply_channel.send(vote).expect("Failed to send append entries reply not successful");
+                let vote_reply = RequestVoteReply {
+                    term: self.current_term as u64,
+                    vote: true,
+                };
+
+                self.current_term = vote_request.term as usize;
+                self.voted_for = true;
+                self.state = State::Follower;
+
+                reply_channel.send(vote_reply).expect("Failed to send vote reply");
+            }
+            RaftMsg::EntriesAppended {append_request, reply_channel} => {
+                if self.current_term > append_request.term as usize {
+                    let vote = AppendEntriesReply {
+                        term: self.current_term as u64,
+                        success: false,
+                    };
+
+                    reply_channel.send(vote).expect("Failed to send append entries reply not successful");
+                    return;
+                }
+
+                let reply = AppendEntriesReply {
+                    term: self.current_term as u64,
+                    success: true,
+                };
+
+                self.state = State::Follower;
+
+                // Reset voted_for on receiving heartbeat
+                if self.current_term < reply.term as usize {
+                    self.current_term = reply.term as usize;
+                    self.voted_for = false;
+                }
+
+                reply_channel.send(reply).expect("Failed to send append entries reply");
+            }
+            RaftMsg::NewLeader { leader_term } => {
+                if self.current_term < leader_term {
+                    self.current_term = leader_term;
+                    self.state = State::Follower;
+                    self.voted_for = false;
+                }
+            }
+            RaftMsg::RequestVoteReply { vote_reply, reply_channel } => {
+                eprintln!("Received vote reply: {:?}", vote_reply);
+                if vote_reply.term as usize > self.current_term {
+                    self.current_term = vote_reply.term as usize;
+                    self.state = State::Follower;
+                    self.voted_for = false;
+                    eprintln!("Stepping down to follower due to higher term in vote reply");
+                    reply_channel.send(()).expect("Failed to send ack for vote reply");
+                    return;
+                }
+
+                let mut votes = match self.state {
+                    State::Candidate { votes } => votes,
+                    _ => {
+                        eprintln!("Received vote reply while not a candidate, ignoring");
+                        reply_channel.send(()).expect("Failed to send ack for vote reply");
                         return;
                     }
-
-                    let reply = AppendEntriesReply {
-                        term: self.current_term as u64,
-                        success: true,
-                    };
-
-                    self.state = State::Follower;
-
-                    // Reset voted_for on receiving heartbeat
-                    if self.current_term < reply.term as usize {
-                        self.current_term = reply.term as usize;
-                        self.voted_for = false;
-                    }
-
-                    reply_channel.send(reply).expect("Failed to send append entries reply");
+                }; 
+                
+                votes += if vote_reply.vote { 1 } else { 0 };
+                self.state = State::Candidate { votes };
+                
+                eprintln!("Total votes received: {}", votes);
+                if votes <= (self.peers.len() + 1) / 2 {
+                    eprintln!("Did not receive majority votes, remaining candidate");
+                    reply_channel.send(()).expect("Failed to send ack for vote reply");
+                    return;
                 }
+                
+                // Get write lock in order to prevent state update while updating state
+                eprintln!("cur state before becoming leader: {:?}", self.state);
+                if self.is_leader() || self.is_follower() {
+                    eprintln!("Node became leader or follower during election, aborting election process");
+                    reply_channel.send(()).expect("Failed to send ack for vote reply");
+                    return;
+                }
+
+                eprintln!("Received majority votes, becoming leader");
+                self.state = State::Leader;
+
+                // Here we would handle the vote reply, e.g., count votes
+                reply_channel.send(()).expect("Failed to send ack for vote reply");
             }
         }
     }
 
     fn is_leader(&self) -> bool {
         self.state == State::Leader
-    }
-
-    fn is_candidate(&self) -> bool {
-        self.state == State::Candidate
     }
 
     fn is_follower(&self) -> bool {
@@ -146,7 +277,7 @@ impl Raft for RaftService {
     ) -> Result<Response<RequestVoteReply>, Status> {
         
         let (snd, rcv) = tokio::sync::oneshot::channel::<RequestVoteReply>();
-        let vote_message = RaftMsg::RequestVote {
+        let vote_message = RaftMsg::HandleVoteRequest {
             vote_request: request.into_inner(),
             reply_channel: snd,
         };
@@ -163,173 +294,25 @@ impl Raft for RaftService {
     ) -> Result<Response<AppendEntriesReply>, Status> {
         let message= request.into_inner();
         let (snd, rcv) = tokio::sync::oneshot::channel::<AppendEntriesReply>();
-        let append_message = RaftMsg::AppendEntries {
+        let append_message = RaftMsg::EntriesAppended {
             append_request: message,
             reply_channel: snd,
         };
         self.mailbox.send(append_message).await.expect("Failed to send append entries message");
         let reply = rcv.await.expect("Failed to receive append entries reply");
-        self.elect_timer_reset_tx.send(()).await.expect("Failed to send election timer reset");
 
         Ok(Response::new(reply))
     }
 }
 
 impl RaftService {
-    fn new(elect_timer_reset_tx: Sender<()>, mailbox: Sender<RaftMsg>) -> Self {
+    fn new(mailbox: Sender<RaftMsg>) -> Self {
         RaftService {
             mailbox, 
-            elect_timer_reset_tx,
         }
     }
 }
 
-async fn election_timer(raft_service: RaftService, mut reset_rx: Receiver<()>) {
-    loop {
-        let duration: u64 = rand::rng().random_range(150..300);
-        let timeout_duration: Duration = Duration::from_millis(duration);
-
-        if node.read().await.is_leader() {
-            // If we're the leader, we don't need to run the election timer
-            //TODO send heartbeat messages
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            for peer in node.read().await.peers.clone() {
-                if let Ok(mut peer_client) = RaftClient::connect(format!("http://{}", peer)).await {
-                    let node = node.clone();
-                    tokio::spawn(async move {
-                        let append_entries_request = Request::new(AppendEntriesMessage {
-                            term: node.read().await.current_term as u64,
-                        });
-
-                        if let Ok(reply) = peer_client.append_entries(append_entries_request).await {
-                            let reply_inner = reply.into_inner();
-                            if reply_inner.success {
-                                eprintln!("Heartbeat acknowledged by {}", peer);
-                                return;
-                            } 
-
-                            eprintln!("Heartbeat rejected by {}", peer);
-                            if reply_inner.term as usize > node.read().await.current_term {
-                                let mut node_guard = node.write().await;
-                                node_guard.current_term = reply_inner.term as usize;
-                                node_guard.state = State::Follower;
-                                eprintln!("Stepping down to follower due to higher term from {}", peer);
-                            }
-                        } 
-                    });
-                }
-            }
-
-            continue;
-        }
-
-        tokio::select! {
-            _ = tokio::time::sleep(timeout_duration) => {
-                // Election timeout elapsed, start a new election
-                if node.read().await.is_candidate() {
-                    eprintln!("Node became candidate during timeout, aborting election");
-                    if let Some(handle) = node.write().await.election_handle.take() {
-                        handle.abort();
-                    }
-                }
-
-                let node_clone = node.clone();
-                let election_handle = tokio::spawn(async move {
-                    election_process(node_clone).await;
-                });
-
-                let mut node_guard = node.write().await;
-                node_guard.election_handle = Some(election_handle);
-            }
-            _ = reset_rx.recv() => {
-                // Received a reset signal, restart the timer
-                continue;
-            }
-        }
-
-    }
-}
-
-async fn election_process(node: Arc<RwLock<Node>>) {
-    eprintln!("Starting election process");
-    {
-        let mut node_guard = node.write().await;
-        node_guard.current_term += 1;
-        node_guard.state = State::Candidate; 
-        node_guard.voted_for = true;
-    }
-
-    eprintln!("Current node state: {:?}", node.read().await.state);
-    let mut join_handles: Vec<JoinHandle<Result<Response<RequestVoteReply>, Status>>> = vec![];
-    let cur_term = node.read().await.current_term;
-    //TODO: borrow dont clone if possible to void performance hit
-    let peers = node.read().await.peers.clone();
-    for peer in peers {
-        eprintln!("Sending requestVote to {}", peer);
-        if let Ok(mut peer_client) = RaftClient::connect(format!("http://{}", peer)).await {
-            let vote_request = Request::new(RequestVoteMessage {
-                term: cur_term as u64,
-            });
-
-            let handle: JoinHandle<Result<Response<RequestVoteReply>, Status>> = tokio::spawn(async move {
-                let vote_reply = peer_client.request_vote(vote_request).await;
-                eprintln!("Got vote reply from {}: {:?}", peer, vote_reply);
-                vote_reply
-            });
-
-            join_handles.push(handle);
-        }
-    }
-
-    let mut votes = vec![];
-
-    //TODO: this is sequential, make it parallel use channels
-    for handle in join_handles {
-        match handle.await {
-            Ok(Ok(vote_reply)) => {
-                votes.push(vote_reply.into_inner());
-            }
-            Ok(Err(e)) => {
-                eprintln!("Error getting vote reply: {}", e);
-            }
-            Err(e) => {
-                eprintln!("Join error: {}", e);
-            } 
-        }
-    }
-    
-    eprintln!("cur state after votes collected: {:?}", node.read().await.state);
-    let mut votes_recieved = 1; // vote for self
-    for vote in votes {
-        eprintln!("Vote: {:?}", vote);
-        if vote.vote {
-            votes_recieved += 1;
-        }
-    }
-
-    eprintln!("Total votes received: {}", votes_recieved);
-    if votes_recieved <= (node.read().await.peers.len() + 1) / 2 {
-        eprintln!("Did not receive majority votes, remaining candidate");
-        return;
-    }
-    
-    {
-        // Get write lock in order to prevent state update while updating state
-        let mut node_guard = node.write().await;
-        eprintln!("cur state before becoming leader: {:?}", node_guard.state);
-        if node_guard.is_leader() || node_guard.is_follower() {
-            eprintln!("Node became leader or follower during election, aborting election process");
-            return;
-        }
-
-        eprintln!("Received majority votes, becoming leader");
-        node_guard.state = State::Leader;
-    }
-
-    // Reset election timer
-    node.read().await.elect_timer_reset_tx.send(()).await.expect("Failed to send reset signal");
-    return;
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -338,24 +321,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("{:?}", args.nodes);
 
     let addr = format!("127.0.0.1:{}", args.port).parse()?;
-    let (elect_rst_sn, elect_rst_rcv) = tokio::sync::mpsc::channel::<()>(1);
     let (mailbox_snd, mailbox_rcv) = tokio::sync::mpsc::channel::<RaftMsg>(100);
-    let raft = RaftService::new(elect_rst_sn,mailbox_snd);
-
+    
     let node: Node = Node {
         current_term: 0,
         state: State::default(),
         peers:args.nodes,
         voted_for: false,
-        election_handle: None,
     };
+    let raft = RaftService::new(mailbox_snd.clone());
 
-    _ = tokio::spawn(async move { node.run(mailbox_rcv).await });
-    _ = tokio::spawn(election_timer(
-        raft, 
-        elect_rst_rcv
-    ));
-    
+    _ = tokio::spawn(async move { node.run(mailbox_rcv, mailbox_snd).await });
     Server::builder()
         .add_service(RaftServer::new(raft))
         .serve(addr)
