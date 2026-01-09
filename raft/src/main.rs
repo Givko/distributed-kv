@@ -92,7 +92,6 @@ impl Node {
                                     if let Ok(reply) = peer_client.append_entries(append_entries_request).await {
                                         let reply_inner = reply.into_inner();
                                         if reply_inner.success {
-                                            eprintln!("Heartbeat acknowledged by {}", peer);
                                             return;
                                         } 
 
@@ -112,8 +111,6 @@ impl Node {
                     }
 
                     eprintln!("Election timeout, starting election");
-
-                
                     self.current_term += 1;
                     self.state = State::Candidate { votes: 1 }; // vote for self
                     self.voted_for = true;
@@ -210,6 +207,7 @@ impl Node {
                 if self.current_term < leader_term {
                     self.current_term = leader_term;
                     self.state = State::Follower;
+                    eprint!("Stepping down to follower due to new leader with higher term {}", leader_term);
                     self.voted_for = false;
                 }
             }
@@ -251,7 +249,7 @@ impl Node {
                     return;
                 }
 
-                eprintln!("Received majority votes, becoming leader");
+                eprintln!("Received majority votes, becoming leader with term {}", self.current_term);
                 self.state = State::Leader;
 
                 // Here we would handle the vote reply, e.g., count votes
