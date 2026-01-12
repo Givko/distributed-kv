@@ -1,0 +1,73 @@
+use crate::raft::raft_client::RaftClient;
+use crate::raft::{AppendEntriesMessage, RequestVoteMessage};
+use tokio::sync::mpsc::{Receiver, Sender};
+use tonic::Request;
+
+use crate::raft_node::{AppendEntriesReplyData, RaftMsg, RequestVoteReplyData};
+pub enum OutMsg {
+    RequestVote { term: u64, peer: String },
+    AppendEntries { term: u64, peer: String },
+}
+
+pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<RaftMsg>) {
+    while let Some(msg) = outbox.recv().await {
+        match msg {
+            OutMsg::RequestVote { term, peer } => {
+                let Ok(mut peer_client) = RaftClient::connect(format!("http://{}", peer)).await
+                else {
+                    eprintln!("Failed to connect to peer {}", peer);
+                    continue;
+                };
+
+                let vote_request = RequestVoteMessage { term };
+                let request = Request::new(vote_request);
+                let vote_reply = peer_client
+                    .request_vote(request)
+                    .await
+                    .expect("Failed to send request vote");
+                let vote_reply = vote_reply.into_inner();
+                let vote_reply_inner = RequestVoteReplyData {
+                    term: vote_reply.term,
+                    vote: vote_reply.vote,
+                };
+                let vote_reply_message = RaftMsg::RequestVoteReply {
+                    vote_reply: vote_reply_inner,
+                    reply_channel: None,
+                };
+
+                raft_inbox
+                    .send(vote_reply_message)
+                    .await
+                    .expect("Failed to send message to raft");
+            }
+            OutMsg::AppendEntries { term, peer } => {
+                let append_entries_request = Request::new(AppendEntriesMessage { term });
+                let Ok(mut peer_client) = RaftClient::connect(format!("http://{}", peer)).await
+                else {
+                    eprintln!("Failed to connect to peer {}", peer);
+                    continue;
+                };
+
+                let Ok(reply) = peer_client.append_entries(append_entries_request).await else {
+                    eprintln!("Failed to recieve reply from peer {}", peer);
+                    continue;
+                };
+
+                let reply_inner = reply.into_inner();
+                let append_entries_reply_data = AppendEntriesReplyData {
+                    term: reply_inner.term,
+                    success: reply_inner.success,
+                };
+
+                let eppend = RaftMsg::AppendEntriesReply {
+                    append_reply: append_entries_reply_data,
+                    reply_channel: None,
+                };
+                raft_inbox
+                    .send(eppend)
+                    .await
+                    .expect("Failed to send new leader message");
+            }
+        }
+    }
+}
