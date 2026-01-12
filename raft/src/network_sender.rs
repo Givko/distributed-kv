@@ -21,24 +21,28 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
 
                 let vote_request = RequestVoteMessage { term };
                 let request = Request::new(vote_request);
-                let vote_reply = peer_client
-                    .request_vote(request)
-                    .await
-                    .expect("Failed to send request vote");
-                let vote_reply = vote_reply.into_inner();
-                let vote_reply_inner = RequestVoteReplyData {
-                    term: vote_reply.term,
-                    vote: vote_reply.vote,
-                };
-                let vote_reply_message = RaftMsg::RequestVoteReply {
-                    vote_reply: vote_reply_inner,
-                    reply_channel: None,
-                };
+                let raft_inbox_clone = raft_inbox.clone();
+                tokio::spawn(async move {
 
-                raft_inbox
-                    .send(vote_reply_message)
-                    .await
-                    .expect("Failed to send message to raft");
+                    let vote_reply = peer_client
+                        .request_vote(request)
+                        .await
+                        .expect("Failed to send request vote");
+                    let vote_reply = vote_reply.into_inner();
+                    let vote_reply_inner = RequestVoteReplyData {
+                        term: vote_reply.term,
+                        vote: vote_reply.vote,
+                    };
+                    let vote_reply_message = RaftMsg::RequestVoteReply {
+                        vote_reply: vote_reply_inner,
+                        reply_channel: None,
+                    };
+
+                    raft_inbox_clone
+                        .send(vote_reply_message)
+                        .await
+                        .expect("Failed to send message to raft");
+                });
             }
             OutMsg::AppendEntries { term, peer } => {
                 let append_entries_request = Request::new(AppendEntriesMessage { term });
@@ -48,25 +52,30 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                     continue;
                 };
 
-                let Ok(reply) = peer_client.append_entries(append_entries_request).await else {
-                    eprintln!("Failed to recieve reply from peer {}", peer);
-                    continue;
-                };
+                let raft_inbox_clone = raft_inbox.clone();
+                tokio::spawn(async move {
 
-                let reply_inner = reply.into_inner();
-                let append_entries_reply_data = AppendEntriesReplyData {
-                    term: reply_inner.term,
-                    success: reply_inner.success,
-                };
+                    let Ok(reply) = peer_client.append_entries(append_entries_request).await else {
+                        eprintln!("Failed to recieve reply from peer {}", peer);
+                        return;
+                    };
 
-                let eppend = RaftMsg::AppendEntriesReply {
-                    append_reply: append_entries_reply_data,
-                    reply_channel: None,
-                };
-                raft_inbox
-                    .send(eppend)
-                    .await
-                    .expect("Failed to send new leader message");
+                    let reply_inner = reply.into_inner();
+                    let append_entries_reply_data = AppendEntriesReplyData {
+                        term: reply_inner.term,
+                        success: reply_inner.success,
+                    };
+
+                    let eppend = RaftMsg::AppendEntriesReply {
+                        append_reply: append_entries_reply_data,
+                        reply_channel: None,
+                    };
+                    raft_inbox_clone
+                        .send(eppend)
+                        .await
+                        .expect("Failed to send new leader message");
+
+                });
             }
         }
     }
