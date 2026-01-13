@@ -1,20 +1,14 @@
 use clap::Parser;
-use raft::raft_server::{Raft, RaftServer};
-use raft::{AppendEntriesMessage, AppendEntriesReply, RequestVoteMessage, RequestVoteReply};
+use raft::raft::raft_server::{Raft, RaftServer};
+use raft::raft::{AppendEntriesMessage, AppendEntriesReply, RequestVoteMessage, RequestVoteReply};
 use tokio::sync::mpsc::Sender;
 use tonic::{Request, Response, Status, transport::Server};
 
-pub mod raft {
-    tonic::include_proto!("raft");
-}
-
-pub mod raft_node;
-use raft_node::{
+use raft::raft_node::{
     AppendEntriesData, AppendEntriesReplyData, Node, RaftMsg, RequestVoteData, RequestVoteReplyData,
 };
 
-pub mod network_sender;
-use network_sender::{OutMsg, network_worker};
+use raft::network_sender::{OutMsg, network_worker};
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -31,6 +25,7 @@ struct Args {
 pub struct RaftService {
     mailbox: Sender<RaftMsg>,
 }
+
 #[tonic::async_trait]
 impl Raft for RaftService {
     async fn request_vote(
