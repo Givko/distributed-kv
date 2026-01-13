@@ -4,7 +4,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use crate::network_sender::OutMsg;
 
 #[derive(Debug, PartialEq, Eq, Default, Clone, Copy)]
-enum State {
+pub enum State {
     Candidate {
         votes: usize,
     },
@@ -72,6 +72,18 @@ impl Node {
             voted_for: false,
             network_inbox,
         }
+    }
+
+    pub fn get_state(&self) -> &State {
+        &self.state
+    }
+
+    pub fn get_current_term(&self) -> usize {
+        self.current_term
+    }
+
+    pub fn has_voted(&self) -> bool {
+        self.voted_for
     }
 
     pub async fn run(mut self, mut inbox: Receiver<RaftMsg>) {
@@ -304,3 +316,94 @@ impl Node {
     }
 }
 
+#[cfg(test)]
+mod raft_node_tests{
+    use super::*;
+
+
+    #[tokio::test]
+    async fn test_handle_vote_request() {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox);
+        let vote_request = RequestVoteData { term: 1 };
+        let vote_reply = node.handle_vote_request(vote_request).await;
+        assert!(vote_reply.vote);
+        assert_eq!(node.get_current_term(), 1);
+        assert_eq!(*node.get_state(), State::Follower);
+    }
+
+    #[tokio::test]
+    async fn test_handle_vote_request_stale_term() {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox);
+        node.current_term = 2;
+        let vote_request = RequestVoteData { term: 1 };
+        let vote_reply = node.handle_vote_request(vote_request).await;
+        assert!(!vote_reply.vote);
+        assert_eq!(node.get_current_term(), 2);
+        assert_eq!(*node.get_state(), State::Follower);
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_vote_reply_become_leader() {
+        let peers = vec!["node1".to_string(), "node2".to_string()];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox);
+        node.current_term = 1;
+        node.state = State::Candidate { votes: 1 };
+
+        let vote_reply = RequestVoteReplyData {
+            term: 1,
+            vote: true,
+        };
+
+        node.handle_request_vote_reply(vote_reply).await;
+        assert_eq!(*node.get_state(), State::Leader);
+        assert_eq!(node.get_current_term(), 1);
+    }
+    
+    #[tokio::test]
+    async fn test_handle_append_entries() {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox);
+        node.current_term = 1;
+        node.state = State::Leader;
+        let append_request = AppendEntriesData { term: 2 };
+        let reply = node.handle_append_entries(append_request).await;
+        assert!(reply.success);
+        assert_eq!(node.get_current_term(), 2);
+        assert_eq!(*node.get_state(), State::Follower);
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_stale_term() {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox);
+        node.current_term = 1;
+        node.state = State::Leader;
+        let append_request = AppendEntriesData { term: 2 };
+        let reply = node.handle_append_entries(append_request).await;
+        assert!(reply.success);
+        assert_eq!(node.get_current_term(), 2);
+        assert_eq!(*node.get_state(), State::Follower);
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_stale_request() {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox);
+        node.current_term = 2;
+        node.state = State::Leader;
+        let append_request = AppendEntriesData { term: 1 };
+        let reply = node.handle_append_entries(append_request).await;
+        assert!(!reply.success);
+        assert_eq!(node.get_current_term(), 2);
+        assert_eq!(*node.get_state(), State::Leader);
+    }
+
+}
