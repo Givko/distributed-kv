@@ -15,7 +15,6 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
             OutMsg::RequestVote { term, peer } => {
                 let Ok(mut peer_client) = RaftClient::connect(format!("http://{}", peer)).await
                 else {
-                    eprintln!("Failed to connect to peer {}", peer);
                     continue;
                 };
 
@@ -48,7 +47,6 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                 let append_entries_request = Request::new(AppendEntriesMessage { term });
                 let Ok(mut peer_client) = RaftClient::connect(format!("http://{}", peer)).await
                 else {
-                    eprintln!("Failed to connect to peer {}", peer);
                     continue;
                 };
 
