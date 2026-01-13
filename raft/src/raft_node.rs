@@ -119,7 +119,7 @@ impl Node {
         self.state = State::Candidate { votes: 1 }; // vote for self
         self.voted_for = true;
 
-        eprintln!("Current node state: {:?}", self.state);
+        eprintln!("Current node state: {:?}, term: {}", self.state, self.current_term);
         let peers = self.peers.clone();
         for peer in peers {
             eprintln!("Sending requestVote to {}", peer);
@@ -136,6 +136,7 @@ impl Node {
 
     async fn handle_vote_request(&mut self, vote_request: RequestVoteData) -> RequestVoteReplyData {
         if self.current_term < vote_request.term as usize {
+            eprintln!("Stepping down as follower due to higher term in vote request");
             self.current_term = vote_request.term as usize;
             self.voted_for = false;
             self.state = State::Follower;
@@ -175,8 +176,10 @@ impl Node {
             return reply;
         }
 
+        if self.state != State::Follower {
+        eprintln!("Received append entries, stepping down to follower");
         self.state = State::Follower;
-
+        }
         // Reset voted_for on receiving heartbeat
         if self.current_term < append_request.term as usize {
             self.current_term = append_request.term as usize;
