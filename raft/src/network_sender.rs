@@ -13,16 +13,15 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
     while let Some(msg) = outbox.recv().await {
         match msg {
             OutMsg::RequestVote { term, peer } => {
-                let Ok(mut peer_client) = RaftClient::connect(format!("http://{}", peer)).await
-                else {
-                    continue;
-                };
-
                 let vote_request = RequestVoteMessage { term };
                 let request = Request::new(vote_request);
                 let raft_inbox_clone = raft_inbox.clone();
                 tokio::spawn(async move {
-
+                    let Ok(mut peer_client) = RaftClient::connect(format!("http://{}", peer)).await
+                    else {
+                        return;
+                    };
+                    
                     let vote_reply = peer_client
                         .request_vote(request)
                         .await
@@ -45,13 +44,12 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
             }
             OutMsg::AppendEntries { term, peer } => {
                 let append_entries_request = Request::new(AppendEntriesMessage { term });
-                let Ok(mut peer_client) = RaftClient::connect(format!("http://{}", peer)).await
-                else {
-                    continue;
-                };
-
                 let raft_inbox_clone = raft_inbox.clone();
                 tokio::spawn(async move {
+                    let Ok(mut peer_client) = RaftClient::connect(format!("http://{}", peer)).await
+                    else {
+                        return;
+                    };
 
                     let Ok(reply) = peer_client.append_entries(append_entries_request).await else {
                         eprintln!("Failed to recieve reply from peer {}", peer);
