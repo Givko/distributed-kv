@@ -189,12 +189,12 @@ impl Node {
         }
 
         if self.state != State::Follower {
-            eprintln!("Received append entries, stepping down to follower");
             self.state = State::Follower;
         }
 
         // Reset voted_for on receiving heartbeat
         if self.current_term < append_request.term as usize {
+            eprintln!("Received append entries, stepping down to follower");
             self.current_term = append_request.term as usize;
             self.voted_for = false;
         }
