@@ -5,15 +5,19 @@ use tonic::Request;
 
 use crate::raft_node::{AppendEntriesReplyData, RaftMsg, RequestVoteReplyData};
 pub enum OutMsg {
-    RequestVote { term: u64, peer: String },
+    RequestVote { term: u64, peer: String, last_log_index: u64, last_log_term: u64 },
     AppendEntries { term: u64, peer: String },
 }
 
 pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<RaftMsg>) {
     while let Some(msg) = outbox.recv().await {
         match msg {
-            OutMsg::RequestVote { term, peer } => {
-                let vote_request = RequestVoteMessage { term };
+            OutMsg::RequestVote { term, peer, last_log_index, last_log_term } => {
+                let vote_request = RequestVoteMessage { 
+                    term,
+                    last_log_index,
+                    last_log_term,
+                };
                 let request = Request::new(vote_request);
                 let raft_inbox_clone = raft_inbox.clone();
                 tokio::spawn(async move {

@@ -16,6 +16,8 @@ pub enum State {
 #[derive(Debug)]
 pub struct RequestVoteData {
     pub term: u64,
+    pub previous_log_index: u64,
+    pub previous_log_term: u64,
 }
 
 #[derive(Debug)]
@@ -34,6 +36,7 @@ pub struct RequestVoteReplyData {
     pub term: u64,
     pub vote: bool,
 }
+
 
 pub enum RaftMsg {
     RequestVoteReply {
@@ -55,11 +58,18 @@ pub enum RaftMsg {
 }
 
 #[derive(Debug)]
+pub struct Entry {
+    pub term: u64,
+    pub command: String,
+}
+
+#[derive(Debug)]
 pub struct Node {
     current_term: usize,
     state: State,
     peers: Vec<String>,
     voted_for: bool,
+    entries: Vec<Entry>,
     network_inbox: Sender<OutMsg>,
 }
 
@@ -71,6 +81,7 @@ impl Node {
             peers,
             voted_for: false,
             network_inbox,
+            entries: vec![],
         }
     }
 
@@ -133,11 +144,20 @@ impl Node {
 
         eprintln!("Current node state: {:?}, term: {}", self.state, self.current_term);
         let peers = self.peers.clone();
+        let last_log_index = self.entries.len() as u64;
+        let last_log_term = if self.entries.is_empty() {
+            0
+        } else {
+            self.entries[last_log_index as usize - 1].term
+        };
+
         for peer in peers {
             eprintln!("Sending requestVote to {}", peer);
             let out_msg = OutMsg::RequestVote {
                 term: self.current_term as u64,
                 peer: peer.clone(),
+                last_log_index: last_log_index as u64,
+                last_log_term,
             };
             self.network_inbox
                 .send(out_msg)
@@ -147,7 +167,10 @@ impl Node {
     }
 
     async fn handle_vote_request(&mut self, vote_request: RequestVoteData) -> RequestVoteReplyData {
-        if self.current_term < vote_request.term as usize {
+        if self.current_term < vote_request.term as usize 
+            && self.entries.len() != vote_request.previous_log_index as usize
+            && self.entries[vote_request.previous_log_index as usize].term != vote_request.previous_log_term 
+        {
             eprintln!("Stepping down as follower due to higher term in vote request");
             self.current_term = vote_request.term as usize;
             self.voted_for = false;
@@ -326,7 +349,11 @@ mod raft_node_tests{
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
         let mut node = Node::new(peers, network_inbox);
-        let vote_request = RequestVoteData { term: 1 };
+        let vote_request = RequestVoteData { 
+            term: 1, 
+            previous_log_index: 0, 
+            previous_log_term: 0 
+        };
         let vote_reply = node.handle_vote_request(vote_request).await;
         assert!(vote_reply.vote);
         assert_eq!(node.get_current_term(), 1);
@@ -339,7 +366,7 @@ mod raft_node_tests{
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
         let mut node = Node::new(peers, network_inbox);
         node.current_term = 2;
-        let vote_request = RequestVoteData { term: 1 };
+        let vote_request = RequestVoteData { term: 1, previous_log_index: 0, previous_log_term: 0 };
         let vote_reply = node.handle_vote_request(vote_request).await;
         assert!(!vote_reply.vote);
         assert_eq!(node.get_current_term(), 2);
