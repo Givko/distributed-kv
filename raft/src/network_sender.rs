@@ -17,8 +17,17 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                 let request = Request::new(vote_request);
                 let raft_inbox_clone = raft_inbox.clone();
                 tokio::spawn(async move {
-                    let Ok(mut peer_client) = RaftClient::connect(format!("http://{}", peer)).await
-                    else {
+                    let timeout_duration = std::time::Duration::from_millis(100);
+                    let Ok(timeout_result) = tokio::time::timeout(
+                        timeout_duration,
+                        RaftClient::connect(format!("http://{}", peer)),
+                    ).await else {
+                        //eprintln!("Timeout connecting to peer {}", peer);
+                        return;
+                    };
+
+                    let Ok(mut peer_client) = timeout_result else {
+                        //eprintln!("Failed to connect to peer {}", peer);
                         return;
                     };
                     
@@ -46,8 +55,17 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                 let append_entries_request = Request::new(AppendEntriesMessage { term });
                 let raft_inbox_clone = raft_inbox.clone();
                 tokio::spawn(async move {
-                    let Ok(mut peer_client) = RaftClient::connect(format!("http://{}", peer)).await
-                    else {
+                    let timeout_duration = std::time::Duration::from_millis(100);
+                    let Ok(timeout_result) = tokio::time::timeout(
+                        timeout_duration,
+                        RaftClient::connect(format!("http://{}", peer)),
+                    ).await else {
+                        //eprintln!("Timeout connecting to peer {}", peer);
+                        return;
+                    };
+
+                    let Ok(mut peer_client) = timeout_result else {
+                        //eprintln!("Failed to connect to peer {}", peer);
                         return;
                     };
 
