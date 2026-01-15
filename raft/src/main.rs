@@ -35,8 +35,8 @@ impl Raft for RaftService {
         let (snd, rcv) = tokio::sync::oneshot::channel::<RequestVoteReplyData>();
         let message_data = RequestVoteData {
             term: request.get_ref().term,
-            previous_log_index: request.get_ref().last_log_index,
-            previous_log_term: request.get_ref().last_log_term,
+            last_log_index: request.get_ref().last_log_index,
+            last_log_term: request.get_ref().last_log_term,
         };
         let vote_message = RaftMsg::VoteRequest {
             vote_request: message_data,
