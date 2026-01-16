@@ -14,7 +14,6 @@ service Raft {
 // Entry represents a single log entry in the Raft log
 message Entry {
   uint64 term    = 1;
-  uint64 index   = 2;
   string command = 3;
 }
 

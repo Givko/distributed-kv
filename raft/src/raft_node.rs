@@ -15,7 +15,6 @@ pub enum State {
 
 #[derive(Debug)]
 pub struct LogEntry {
-    pub index: u64,
     pub term: u64,
     pub command: String,
 }
@@ -236,7 +235,22 @@ impl Node {
         &mut self,
         append_request: AppendEntriesData,
     ) -> AppendEntriesReplyData {
-        if self.current_term > append_request.term as usize {
+        if self.current_term > append_request.term as usize
+            || self.entries.len() < append_request.prev_log_index as usize
+            || (append_request.prev_log_index != 0
+                && self
+                    .entries
+                    .get(append_request.prev_log_index as usize - 1)
+                    .map_or(0, |e| e.term)
+                    != append_request.prev_log_term)
+        {
+            self.state = if self.current_term < append_request.term as usize {
+                State::Follower
+            } else {
+                self.state
+            };
+            self.current_term = std::cmp::max(self.current_term, append_request.term as usize);
+
             let reply = AppendEntriesReplyData {
                 term: self.current_term as u64,
                 success: false,
@@ -245,15 +259,37 @@ impl Node {
             return reply;
         }
 
+        // Reset voted_for on receiving heartbeat
+        if self.current_term <= append_request.term as usize {
+            self.current_term = append_request.term as usize;
+            self.voted_for = None;
+        }
+
         if self.state != State::Follower {
+            eprintln!("Received append entries, stepping down to follower");
             self.state = State::Follower;
         }
 
-        // Reset voted_for on receiving heartbeat
-        if self.current_term < append_request.term as usize {
-            eprintln!("Received append entries, stepping down to follower");
-            self.current_term = append_request.term as usize;
-            self.voted_for = None;
+        // Remove conflicting entries
+        if append_request.prev_log_index != 0
+            && self.entries.len() > append_request.prev_log_index as usize
+        {
+            self.entries
+                .truncate(append_request.prev_log_index as usize);
+        }
+
+        // Append new entries
+        for entry in append_request.entries {
+            self.entries.push(Entry {
+                term: entry.term,
+                command: entry.command,
+            });
+        }
+
+        // Update commit index
+        if append_request.leader_commit > self.commit_index {
+            self.commit_index =
+                std::cmp::min(self.entries.len() as u64, append_request.leader_commit);
         }
 
         let reply = AppendEntriesReplyData {
@@ -651,6 +687,242 @@ mod raft_node_tests {
         assert!(!reply.success);
         assert_eq!(node.get_current_term(), 2);
         assert_eq!(*node.get_state(), State::Leader);
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_prev_log_index_high() {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        node.current_term = 2;
+        node.state = State::Leader;
+        let append_request = AppendEntriesData {
+            term: 3,
+            prev_log_index: 1,
+            prev_log_term: 0,
+            leader_commit: 0,
+            leader_id: String::from("node2"),
+            entries: vec![],
+        };
+
+        let reply = node.handle_append_entries(append_request).await;
+        assert!(!reply.success);
+        assert_eq!(node.get_current_term(), 3);
+        assert_eq!(*node.get_state(), State::Follower);
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_prev_log_term_mismatch() {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        node.current_term = 2;
+        node.state = State::Leader;
+        node.entries.push(Entry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        let append_request = AppendEntriesData {
+            term: 3,
+            prev_log_index: 1,
+            prev_log_term: 0,
+            leader_commit: 0,
+            leader_id: String::from("node2"),
+            entries: vec![],
+        };
+
+        let reply = node.handle_append_entries(append_request).await;
+        assert!(!reply.success);
+        assert_eq!(node.get_current_term(), 3);
+        assert_eq!(*node.get_state(), State::Follower);
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_successful_append() {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        node.current_term = 2;
+        node.state = State::Follower;
+        node.entries.push(Entry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        let append_request = AppendEntriesData {
+            term: 2,
+            prev_log_index: 1,
+            prev_log_term: 1,
+            leader_commit: 0,
+            leader_id: String::from("node2"),
+            entries: vec![LogEntry {
+                term: 2,
+                command: "cmd2".to_string(),
+            }],
+        };
+        let reply = node.handle_append_entries(append_request).await;
+        assert!(reply.success);
+        assert_eq!(node.entries.len(), 2);
+        assert_eq!(node.entries[1].term, 2);
+        assert_eq!(node.entries[1].command, "cmd2".to_string());
+        assert_eq!(node.get_current_term(), 2);
+        assert_eq!(*node.get_state(), State::Follower);
+        assert_eq!(node.commit_index, 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_conflicting_entries() {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        node.current_term = 2;
+        node.state = State::Follower;
+        node.entries.push(Entry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        node.entries.push(Entry {
+            term: 2,
+            command: "cmd2".to_string(),
+        });
+        let append_request = AppendEntriesData {
+            term: 3,
+            prev_log_index: 1,
+            prev_log_term: 1,
+            leader_commit: 0,
+            leader_id: String::from("node2"),
+            entries: vec![LogEntry {
+                term: 3,
+                command: "cmd3".to_string(),
+            }],
+        };
+        let reply = node.handle_append_entries(append_request).await;
+        assert!(reply.success);
+        assert_eq!(node.entries.len(), 2, "Conflicting entry was not removed");
+        assert_eq!(node.entries[1].term, 3, "New entry was not appended");
+        assert_eq!(
+            node.entries[1].command,
+            "cmd3".to_string(),
+            "New entry command mismatch"
+        );
+        assert_eq!(node.get_current_term(), 3, "Term was not updated");
+        assert_eq!(
+            *node.get_state(),
+            State::Follower,
+            "State should be follower"
+        );
+        assert_eq!(node.commit_index, 0, "Commit index should remain unchanged");
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_heartbeat_update_commit_index_with_leader() {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        node.current_term = 2;
+        node.state = State::Follower;
+        node.entries.push(Entry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        node.entries.push(Entry {
+            term: 2,
+            command: "cmd2".to_string(),
+        });
+        let append_request = AppendEntriesData {
+            term: 3,
+            prev_log_index: 2,
+            prev_log_term: 2,
+            leader_commit: 2,
+            leader_id: String::from("node2"),
+            entries: vec![],
+        };
+
+        let reply = node.handle_append_entries(append_request).await;
+        assert!(reply.success);
+        assert_eq!(node.entries.len(), 2, "Entries are changed");
+        assert_eq!(
+            *node.get_state(),
+            State::Follower,
+            "State should be follower"
+        );
+        assert_eq!(node.commit_index, 2, "Commit index should be updated");
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_update_commit_with_entries_length() {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        node.current_term = 2;
+        node.state = State::Follower;
+        node.entries.push(Entry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        node.entries.push(Entry {
+            term: 2,
+            command: "cmd2".to_string(),
+        });
+        let append_request = AppendEntriesData {
+            term: 3,
+            prev_log_index: 2,
+            prev_log_term: 2,
+            leader_commit: 4,
+            leader_id: String::from("node2"),
+            entries: vec![],
+        };
+
+        let reply = node.handle_append_entries(append_request).await;
+        assert!(reply.success);
+        assert_eq!(node.entries.len(), 2, "Entries are changed");
+        assert_eq!(
+            *node.get_state(),
+            State::Follower,
+            "State should be follower"
+        );
+
+        assert_eq!(node.commit_index, 2, "Commit index should be updated");
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_update_commit_with_new_entries_length() {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        node.current_term = 2;
+        node.state = State::Follower;
+        node.entries.push(Entry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        node.entries.push(Entry {
+            term: 2,
+            command: "cmd2".to_string(),
+        });
+        let append_request = AppendEntriesData {
+            term: 3,
+            prev_log_index: 2,
+            prev_log_term: 2,
+            leader_commit: 4,
+            leader_id: String::from("node2"),
+            entries: vec![LogEntry {
+                term: 3,
+                command: "cmd3".to_string(),
+            }],
+        };
+
+        let reply = node.handle_append_entries(append_request).await;
+        assert!(reply.success);
+        assert_eq!(node.entries.len(), 3, "Entries are changed");
+        assert_eq!(node.entries[2].term, 3);
+        assert_eq!(node.entries[2].command, "cmd3".to_string());
+        assert_eq!(
+            *node.get_state(),
+            State::Follower,
+            "State should be follower"
+        );
+
+        assert_eq!(node.commit_index, 3, "Commit index should be updated");
     }
 
     #[tokio::test]

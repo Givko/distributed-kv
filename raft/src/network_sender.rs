@@ -1,9 +1,9 @@
 use crate::raft::raft_client::RaftClient;
 use crate::raft::{AppendEntriesMessage, Entry, RequestVoteMessage};
+use crate::raft_node::{AppendEntriesReplyData, RaftMsg, RequestVoteReplyData};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tonic::Request;
 
-use crate::raft_node::{AppendEntriesReplyData, RaftMsg, RequestVoteReplyData};
 pub enum OutMsg {
     RequestVote {
         term: u64,
@@ -22,6 +22,7 @@ pub enum OutMsg {
         entries: Vec<LogEntry>,
     },
 }
+
 pub struct LogEntry {
     pub index: u64,
     pub term: u64,
@@ -95,7 +96,6 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                 let log_entries: Vec<Entry> = entries
                     .into_iter()
                     .map(|entry| Entry {
-                        index: entry.index,
                         term: entry.term,
                         command: entry.command,
                     })

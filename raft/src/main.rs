@@ -77,7 +77,6 @@ impl Raft for RaftService {
                 .entries
                 .iter()
                 .map(|e| LogEntry {
-                    index: e.index,
                     term: e.term,
                     command: e.command.clone(),
                 })
