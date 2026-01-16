@@ -5,7 +5,8 @@ use tokio::sync::mpsc::Sender;
 use tonic::{Request, Response, Status, transport::Server};
 
 use raft::raft_node::{
-    AppendEntriesData, AppendEntriesReplyData, Node, RaftMsg, RequestVoteData, RequestVoteReplyData,
+    AppendEntriesData, AppendEntriesReplyData, LogEntry, Node, RaftMsg, RequestVoteData,
+    RequestVoteReplyData,
 };
 
 use raft::network_sender::{OutMsg, network_worker};
@@ -19,6 +20,9 @@ struct Args {
 
     #[arg(short, long, num_args = 1.., value_delimiter = ',')]
     nodes: Vec<String>,
+
+    #[arg(short, long)]
+    id: String,
 }
 
 #[derive(Debug)]
@@ -37,6 +41,7 @@ impl Raft for RaftService {
             term: request.get_ref().term,
             last_log_index: request.get_ref().last_log_index,
             last_log_term: request.get_ref().last_log_term,
+            candidate: request.get_ref().candidate.clone(),
         };
         let vote_message = RaftMsg::VoteRequest {
             vote_request: message_data,
@@ -62,7 +67,22 @@ impl Raft for RaftService {
     ) -> Result<Response<AppendEntriesReply>, Status> {
         let message = request.into_inner();
         let (snd, rcv) = tokio::sync::oneshot::channel::<AppendEntriesReplyData>();
-        let append_entries_daata = AppendEntriesData { term: message.term };
+        let append_entries_daata = AppendEntriesData {
+            term: message.term,
+            prev_log_index: message.prev_log_index,
+            prev_log_term: message.prev_log_term,
+            leader_commit: message.leader_commit,
+            leader_id: message.leader_id.clone(),
+            entries: message
+                .entries
+                .iter()
+                .map(|e| LogEntry {
+                    index: e.index,
+                    term: e.term,
+                    command: e.command.clone(),
+                })
+                .collect(),
+        };
         let append_message = RaftMsg::AppendEntries {
             append_request: append_entries_daata,
             reply_channel: Some(snd),
@@ -99,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mailbox_clone = mailbox_snd.clone();
     _ = tokio::spawn(async move { network_worker(outbox_rcv, mailbox_clone).await });
 
-    let node: Node = Node::new(args.nodes, outbox_snd);
+    let node: Node = Node::new(args.nodes, outbox_snd, args.id);
     _ = tokio::spawn(async move { node.run(mailbox_rcv).await });
 
     let raft = RaftService::new(mailbox_snd.clone());

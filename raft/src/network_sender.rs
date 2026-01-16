@@ -1,22 +1,48 @@
 use crate::raft::raft_client::RaftClient;
-use crate::raft::{AppendEntriesMessage, RequestVoteMessage};
+use crate::raft::{AppendEntriesMessage, Entry, RequestVoteMessage};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tonic::Request;
 
 use crate::raft_node::{AppendEntriesReplyData, RaftMsg, RequestVoteReplyData};
 pub enum OutMsg {
-    RequestVote { term: u64, peer: String, last_log_index: u64, last_log_term: u64 },
-    AppendEntries { term: u64, peer: String },
+    RequestVote {
+        term: u64,
+        peer: String,
+        last_log_index: u64,
+        last_log_term: u64,
+        candidate: String,
+    },
+    AppendEntries {
+        term: u64,
+        peer: String,
+        prev_log_index: u64,
+        prev_log_term: u64,
+        leader_commit: u64,
+        leader_id: String,
+        entries: Vec<LogEntry>,
+    },
+}
+pub struct LogEntry {
+    pub index: u64,
+    pub term: u64,
+    pub command: String,
 }
 
 pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<RaftMsg>) {
     while let Some(msg) = outbox.recv().await {
         match msg {
-            OutMsg::RequestVote { term, peer, last_log_index, last_log_term } => {
-                let vote_request = RequestVoteMessage { 
+            OutMsg::RequestVote {
+                term,
+                peer,
+                last_log_index,
+                last_log_term,
+                candidate,
+            } => {
+                let vote_request = RequestVoteMessage {
                     term,
                     last_log_index,
                     last_log_term,
+                    candidate,
                 };
                 let request = Request::new(vote_request);
                 let raft_inbox_clone = raft_inbox.clone();
@@ -25,7 +51,9 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                     let Ok(timeout_result) = tokio::time::timeout(
                         timeout_duration,
                         RaftClient::connect(format!("http://{}", peer)),
-                    ).await else {
+                    )
+                    .await
+                    else {
                         //eprintln!("Timeout connecting to peer {}", peer);
                         return;
                     };
@@ -34,7 +62,7 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                         //eprintln!("Failed to connect to peer {}", peer);
                         return;
                     };
-                    
+
                     let vote_reply = peer_client
                         .request_vote(request)
                         .await
@@ -55,15 +83,40 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                         .expect("Failed to send message to raft");
                 });
             }
-            OutMsg::AppendEntries { term, peer } => {
-                let append_entries_request = Request::new(AppendEntriesMessage { term });
+            OutMsg::AppendEntries {
+                term,
+                peer,
+                prev_log_index,
+                prev_log_term,
+                leader_commit,
+                leader_id,
+                entries,
+            } => {
+                let log_entries: Vec<Entry> = entries
+                    .into_iter()
+                    .map(|entry| Entry {
+                        index: entry.index,
+                        term: entry.term,
+                        command: entry.command,
+                    })
+                    .collect();
+                let append_entries_request = Request::new(AppendEntriesMessage {
+                    term,
+                    prev_log_index,
+                    prev_log_term,
+                    leader_commit,
+                    leader_id,
+                    entries: log_entries,
+                });
                 let raft_inbox_clone = raft_inbox.clone();
                 tokio::spawn(async move {
                     let timeout_duration = std::time::Duration::from_millis(100);
                     let Ok(timeout_result) = tokio::time::timeout(
                         timeout_duration,
                         RaftClient::connect(format!("http://{}", peer)),
-                    ).await else {
+                    )
+                    .await
+                    else {
                         //eprintln!("Timeout connecting to peer {}", peer);
                         return;
                     };
@@ -92,7 +145,6 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                         .send(eppend)
                         .await
                         .expect("Failed to send new leader message");
-
                 });
             }
         }
