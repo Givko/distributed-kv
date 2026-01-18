@@ -24,7 +24,6 @@ pub enum OutMsg {
 }
 
 pub struct LogEntry {
-    pub index: u64,
     pub term: u64,
     pub command: String,
 }
@@ -100,14 +99,16 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                         command: entry.command,
                     })
                     .collect();
-                let append_entries_request = Request::new(AppendEntriesMessage {
+                let message = AppendEntriesMessage {
                     term,
                     prev_log_index,
                     prev_log_term,
                     leader_commit,
                     leader_id,
                     entries: log_entries,
-                });
+                };
+                let entries_count = message.entries.len();
+                let append_entries_request = Request::new(message);
                 let raft_inbox_clone = raft_inbox.clone();
                 tokio::spawn(async move {
                     let timeout_duration = std::time::Duration::from_millis(100);
@@ -135,6 +136,8 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                     let append_entries_reply_data = AppendEntriesReplyData {
                         term: reply_inner.term,
                         success: reply_inner.success,
+                        peer,
+                        entries_count: entries_count as u64,
                     };
 
                     let eppend = RaftMsg::AppendEntriesReply {
