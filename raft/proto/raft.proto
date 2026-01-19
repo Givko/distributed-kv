@@ -9,6 +9,21 @@ service Raft {
   
   // AppendEntries is used for both log replication and heartbeats
   rpc AppendEntries (AppendEntriesMessage) returns (AppendEntriesReply);
+
+  // Used to set a kvp in the state
+  rpc Set (SetMessage) returns (SetReply);
+}
+
+// Command which sets a key with value to the state machine
+message SetMessage {
+  string key   = 1;
+  string value = 2;
+}
+
+// Reply from the set command
+message SetReply {
+  bool success  = 1;
+  string leader = 2;
 }
 
 // Entry represents a single log entry in the Raft log

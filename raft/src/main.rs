@@ -1,12 +1,15 @@
 use clap::Parser;
 use raft::raft::raft_server::{Raft, RaftServer};
-use raft::raft::{AppendEntriesMessage, AppendEntriesReply, RequestVoteMessage, RequestVoteReply};
+use raft::raft::{
+    AppendEntriesMessage, AppendEntriesReply, RequestVoteMessage, RequestVoteReply, SetMessage,
+    SetReply,
+};
 use tokio::sync::mpsc::Sender;
 use tonic::{Request, Response, Status, transport::Server};
 
 use raft::raft_node::{
-    AppendEntriesData, AppendEntriesReplyData, LogEntry, Node, RaftMsg, RequestVoteData,
-    RequestVoteReplyData,
+    AppendEntriesData, AppendEntriesReplyData, ChangeStateReply, LogEntry, Node, RaftMsg,
+    RequestVoteData, RequestVoteReplyData,
 };
 
 use raft::network_sender::{OutMsg, network_worker};
@@ -32,6 +35,29 @@ pub struct RaftService {
 
 #[tonic::async_trait]
 impl Raft for RaftService {
+    async fn set(&self, _request: Request<SetMessage>) -> Result<Response<SetReply>, Status> {
+        let msg = _request.into_inner();
+        eprintln!("set {}: {}", msg.key, msg.value);
+
+        let command = format!("SET {} {}", msg.key, msg.value);
+        let (snd, rcv) = tokio::sync::oneshot::channel::<ChangeStateReply>();
+        let raft_msg = RaftMsg::ChangeState {
+            command,
+            reply_channel: Some(snd),
+        };
+        self.mailbox
+            .send(raft_msg)
+            .await
+            .expect("failed to send to raft");
+        let reply = rcv.await.expect("failed to rcv reply");
+        if !reply.success {
+            return Err(Status::cancelled("node is not leader")); // TODO: return leader URL 
+        }
+        Ok(Response::new(SetReply {
+            success: false,
+            leader: String::new(),
+        }))
+    }
     async fn request_vote(
         &self,
         request: Request<RequestVoteMessage>,
