@@ -54,8 +54,8 @@ impl Raft for RaftService {
             return Err(Status::cancelled("node is not leader")); // TODO: return leader URL 
         }
         Ok(Response::new(SetReply {
-            success: false,
-            leader: String::new(),
+            success: true,
+            leader: String::new(), // TODO: Add leader to response
         }))
     }
     async fn request_vote(
