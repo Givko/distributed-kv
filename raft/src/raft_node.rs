@@ -54,6 +54,7 @@ pub struct RequestVoteReplyData {
 #[derive(Debug)]
 pub struct ChangeStateReply {
     pub success: bool,
+    pub leader: String,
 }
 
 pub enum RaftMsg {
@@ -77,6 +78,10 @@ pub enum RaftMsg {
         command: String,
         reply_channel: Option<tokio::sync::oneshot::Sender<ChangeStateReply>>,
     },
+    GetState {
+        key: String,
+        reply_channel: tokio::sync::oneshot::Sender<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -90,6 +95,7 @@ pub struct Node {
     id: String,
     commit_index: u64,
 
+    leader: String,
     last_applied: u64,
     next_index: HashMap<String, u64>,
     match_index: HashMap<String, u64>,
@@ -107,6 +113,7 @@ impl Node {
             match_index_map.insert(peer, 0);
         }
         Node {
+            leader: String::new(),
             current_term: 0,
             state: State::default(),
             peers,
@@ -184,7 +191,10 @@ impl Node {
                 reply_channel,
             } => {
                 if !matches!(self.state, State::Leader) {
-                    let reply = ChangeStateReply { success: false };
+                    let reply = ChangeStateReply {
+                        success: false,
+                        leader: self.leader.clone(),
+                    };
                     self.send_to_reply_channel(reply_channel, reply)?;
                 } else {
                     for peer in &self.peers {
@@ -203,6 +213,7 @@ impl Node {
                         eprintln!("replicating to {}", peer.clone());
                         self.network_inbox.send(append_entries).await?;
                     }
+
                     self.entries.push(LogEntry {
                         term: self.current_term,
                         command,
@@ -211,6 +222,13 @@ impl Node {
                     if let Some(reply_channel) = reply_channel {
                         self.pending_clients.insert(log_index, reply_channel);
                     }
+                }
+            }
+            RaftMsg::GetState { key, reply_channel } => {
+                if let Some(val) = self.state_machine.get(&key) {
+                    self.send_to_reply_channel(Some(reply_channel), val.to_owned())?;
+                } else {
+                    self.send_to_reply_channel(Some(reply_channel), "".to_owned())?;
                 }
             }
         }
@@ -239,8 +257,10 @@ impl Node {
 
             self.last_applied = i;
             let reply_channel = self.pending_clients.remove(&i);
-            eprintln!("replying to {}", i);
-            let reply = ChangeStateReply { success: true };
+            let reply = ChangeStateReply {
+                success: true,
+                leader: self.id.clone(),
+            };
             self.send_to_reply_channel(reply_channel, reply)?;
         }
 
@@ -250,7 +270,7 @@ impl Node {
     async fn send_heartbeat(&self) -> anyhow::Result<()> {
         // Placeholder for heartbeat logic
         for peer in &self.peers {
-            let prev_log_index = *(self.next_index.get(peer).expect("cant get next_index"));
+            let prev_log_index = self.entries.len() as u64;
             // If we're the leader, we don't need to run the election timer
             let out_msg = OutMsg::AppendEntries {
                 term: self.current_term as u64,
@@ -356,6 +376,9 @@ impl Node {
                     .map_or(0, |e| e.term)
                     != append_request.prev_log_term)
         {
+            eprintln!("current_term {}", self.current_term.clone());
+            eprintln!("prev_log_index {}", append_request.prev_log_index.clone());
+            eprintln!("prev_log_term {}", append_request.prev_log_term);
             self.state = if self.current_term < append_request.term {
                 State::Follower
             } else {
@@ -382,6 +405,7 @@ impl Node {
 
         if self.state != State::Follower {
             eprintln!("Received append entries, stepping down to follower");
+            self.leader = append_request.leader_id;
             self.state = State::Follower;
         }
 
@@ -397,8 +421,15 @@ impl Node {
         if entries_count > 0 {
             eprintln!("commiting new entries {}", entries_count);
         }
-        // Append new entries
-        self.entries.extend(append_request.entries);
+
+        for entry in append_request.entries {
+            //eprintln!(
+            //   "pushing: command {} for term {}",
+            //   entry.command.clone(),
+            //   entry.term.clone()
+            //);
+            self.entries.push(entry);
+        }
 
         // Update commit index
         if append_request.leader_commit > self.commit_index {
@@ -519,14 +550,17 @@ impl Node {
             .get(&append_entries_reply_data.peer)
             .expect("no peer found in state");
 
-        if next_index <= 1 {
-            return Ok(());
+        eprintln!(
+            "next_index {} for peer {}",
+            next_index, append_entries_reply_data.peer
+        );
+        if next_index > 1 {
+            next_index = next_index - 1;
         }
 
-        next_index = next_index - 1;
         let prev_log_index = next_index - 1;
         let mut prev_log_term = 0;
-        if prev_log_term > 0 {
+        if prev_log_index > 0 {
             prev_log_term = self
                 .entries
                 .get(prev_log_index as usize - 1)
@@ -541,6 +575,11 @@ impl Node {
             })
             .collect();
 
+        eprintln!(
+            "setting new next_index {} for {}",
+            next_index,
+            append_entries_reply_data.peer.clone()
+        );
         _ = self
             .next_index
             .insert(append_entries_reply_data.peer.clone(), next_index);

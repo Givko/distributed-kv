@@ -1,8 +1,8 @@
 use clap::Parser;
 use raft::raft::raft_server::{Raft, RaftServer};
 use raft::raft::{
-    AppendEntriesMessage, AppendEntriesReply, RequestVoteMessage, RequestVoteReply, SetMessage,
-    SetReply,
+    AppendEntriesMessage, AppendEntriesReply, GetMessage, GetReply, RequestVoteMessage,
+    RequestVoteReply, SetMessage, SetReply,
 };
 use tokio::sync::mpsc::Sender;
 use tonic::{Request, Response, Status, transport::Server};
@@ -35,6 +35,20 @@ pub struct RaftService {
 
 #[tonic::async_trait]
 impl Raft for RaftService {
+    async fn get(&self, request: Request<GetMessage>) -> Result<Response<GetReply>, Status> {
+        let get_command = request.into_inner();
+        let (snd, rcv) = tokio::sync::oneshot::channel::<String>();
+        let raft_msg = RaftMsg::GetState {
+            key: get_command.key,
+            reply_channel: snd,
+        };
+        self.mailbox
+            .send(raft_msg)
+            .await
+            .expect("failed to send raft msg");
+        let value = rcv.await.expect("did not rcv from reply channel");
+        Ok(Response::new(GetReply { value }))
+    }
     async fn set(&self, _request: Request<SetMessage>) -> Result<Response<SetReply>, Status> {
         let msg = _request.into_inner();
         eprintln!("set {}: {}", msg.key, msg.value);

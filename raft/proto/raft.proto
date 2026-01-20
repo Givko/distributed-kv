@@ -12,6 +12,17 @@ service Raft {
 
   // Used to set a kvp in the state
   rpc Set (SetMessage) returns (SetReply);
+
+  // Used to get a value based on a key
+  rpc Get (GetMessage) returns (GetReply);
+}
+
+message GetMessage {
+  string key = 1;
+}
+
+message GetReply {
+  string value = 1;
 }
 
 // Command which sets a key with value to the state machine

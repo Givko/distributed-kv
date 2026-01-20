@@ -54,12 +54,12 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                     )
                     .await
                     else {
-                        //eprintln!("Timeout connecting to peer {}", peer);
+                        eprintln!("Timeout connecting to peer {}", peer);
                         return;
                     };
 
                     let Ok(mut peer_client) = timeout_result else {
-                        //eprintln!("Failed to connect to peer {}", peer);
+                        eprintln!("Failed to connect to peer {}", peer);
                         return;
                     };
 
@@ -118,17 +118,14 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                     )
                     .await
                     else {
-                        //eprintln!("Timeout connecting to peer {}", peer);
                         return;
                     };
 
                     let Ok(mut peer_client) = timeout_result else {
-                        //eprintln!("Failed to connect to peer {}", peer);
                         return;
                     };
 
                     let Ok(reply) = peer_client.append_entries(append_entries_request).await else {
-                        eprintln!("Failed to recieve reply from peer {}", peer);
                         return;
                     };
 
@@ -136,16 +133,15 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                     let append_entries_reply_data = AppendEntriesReplyData {
                         term: reply_inner.term,
                         success: reply_inner.success,
-                        peer,
+                        peer: peer.clone(),
                         entries_count: entries_count as u64,
                     };
-
-                    let eppend = RaftMsg::AppendEntriesReply {
+                    let append = RaftMsg::AppendEntriesReply {
                         append_reply: append_entries_reply_data,
                         reply_channel: None,
                     };
                     raft_inbox_clone
-                        .send(eppend)
+                        .send(append)
                         .await
                         .expect("Failed to send new leader message");
                 });
