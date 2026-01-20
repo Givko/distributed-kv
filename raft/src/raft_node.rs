@@ -1199,4 +1199,83 @@ mod raft_node_tests {
         assert_eq!(*node.next_index.get("test").expect("no peer found"), 1);
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_reply_unsuccess_decrement_next_index() -> anyhow::Result<()>
+    {
+        let peers = vec!["test".to_owned()];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        node.current_term = 2;
+        node.next_index.insert("test".to_owned(), 3);
+        node.state = State::Leader;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 2,
+            command: "cmd2".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd3".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 2,
+            command: "cmd4".to_string(),
+        });
+        let append_reply = AppendEntriesReplyData {
+            term: 2,
+            success: false,
+
+            peer: "test".to_owned(),
+            entries_count: 0,
+        };
+
+        node.handle_append_entries_reply(append_reply).await?;
+        assert_eq!(node.current_term, 2);
+        assert_eq!(node.state, State::Leader);
+        assert_eq!(*node.next_index.get("test").expect("no peer found"), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_reply_unsuccess_next_index_stays_1() -> anyhow::Result<()> {
+        let peers = vec!["test".to_owned()];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        node.current_term = 2;
+        node.next_index.insert("test".to_owned(), 1);
+        node.state = State::Leader;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 2,
+            command: "cmd2".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd3".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 2,
+            command: "cmd4".to_string(),
+        });
+        let append_reply = AppendEntriesReplyData {
+            term: 2,
+            success: false,
+
+            peer: "test".to_owned(),
+            entries_count: 0,
+        };
+
+        node.handle_append_entries_reply(append_reply).await?;
+        assert_eq!(node.current_term, 2);
+        assert_eq!(node.state, State::Leader);
+        assert_eq!(*node.next_index.get("test").expect("no peer found"), 1);
+        Ok(())
+    }
 }
