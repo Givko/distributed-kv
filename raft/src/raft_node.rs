@@ -105,7 +105,7 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(peers: Vec<String>, network_inbox: Sender<OutMsg>, candidate_id: String) -> Self {
+    pub fn new(peers: Vec<String>, network_inbox: Sender<OutMsg>, id: String) -> Self {
         let mut next_index_map = HashMap::new();
         let mut match_index_map = HashMap::new();
         for peer in peers.clone() {
@@ -120,7 +120,7 @@ impl Node {
             voted_for: None,
             network_inbox,
             entries: vec![],
-            id: candidate_id,
+            id,
             commit_index: 0,
             last_applied: 0,
             next_index: next_index_map,
@@ -423,11 +423,6 @@ impl Node {
         }
 
         for entry in append_request.entries {
-            //eprintln!(
-            //   "pushing: command {} for term {}",
-            //   entry.command.clone(),
-            //   entry.term.clone()
-            //);
             self.entries.push(entry);
         }
 
@@ -1276,6 +1271,132 @@ mod raft_node_tests {
         assert_eq!(node.current_term, 2);
         assert_eq!(node.state, State::Leader);
         assert_eq!(*node.next_index.get("test").expect("no peer found"), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_commands_applies_everything_after_commit_index() -> anyhow::Result<()> {
+        let peers = vec!["test".to_owned()];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox, String::from("self"));
+        node.current_term = 1;
+        node.state = State::Leader;
+        node.commit_index = 3;
+        node.last_applied = 0;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "set key1 val1".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "set key2 val2".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "set key1 val3".to_string(),
+        });
+
+        let (snd1, rcv1) = tokio::sync::oneshot::channel::<ChangeStateReply>();
+        let (snd2, rcv2) = tokio::sync::oneshot::channel::<ChangeStateReply>();
+        let (snd3, rcv3) = tokio::sync::oneshot::channel::<ChangeStateReply>();
+        node.pending_clients.insert(1, snd1);
+        node.pending_clients.insert(2, snd2);
+        node.pending_clients.insert(3, snd3);
+        node.apply_commands().await?;
+
+        let res1 = rcv1.await?;
+        let res2 = rcv2.await?;
+        let res3 = rcv3.await?;
+
+        let val1 = node
+            .state_machine
+            .get("key1")
+            .expect("missing value")
+            .to_owned();
+        let val2 = node
+            .state_machine
+            .get("key2")
+            .expect("missing value")
+            .to_owned();
+
+        assert_eq!(val1, "val3".to_owned());
+        assert_eq!(val2, "val2".to_owned());
+
+        assert_eq!(res1.success, true);
+        assert_eq!(res1.leader, node.id);
+        assert_eq!(res2.success, true);
+        assert_eq!(res2.leader, node.id);
+        assert_eq!(res3.success, true);
+        assert_eq!(res3.leader, node.id);
+
+        assert_eq!(node.current_term, 1);
+        assert_eq!(node.state, State::Leader);
+        assert_eq!(node.last_applied, node.commit_index);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_commands_has_state_applies_everything_after_commit_index()
+    -> anyhow::Result<()> {
+        let peers = vec!["test".to_owned()];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(peers, network_inbox, String::from("self"));
+        node.current_term = 1;
+        node.state = State::Leader;
+        node.commit_index = 3;
+        node.last_applied = 1;
+        node.state_machine
+            .insert("key1".to_owned(), "val1".to_owned());
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "set key1 val3".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "set key2 val2".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "set key3 val3".to_string(),
+        });
+
+        let (snd2, rcv2) = tokio::sync::oneshot::channel::<ChangeStateReply>();
+        let (snd3, rcv3) = tokio::sync::oneshot::channel::<ChangeStateReply>();
+        node.pending_clients.insert(2, snd2);
+        node.pending_clients.insert(3, snd3);
+        node.apply_commands().await?;
+
+        let res2 = rcv2.await?;
+        let res3 = rcv3.await?;
+
+        let val2 = node
+            .state_machine
+            .get("key2")
+            .expect("missing value")
+            .to_owned();
+        let val3 = node
+            .state_machine
+            .get("key3")
+            .expect("missing value")
+            .to_owned();
+        let val1 = node
+            .state_machine
+            .get("key1")
+            .expect("no val found")
+            .to_owned();
+
+        assert_eq!(val1, "val1".to_owned());
+        assert_eq!(val2, "val2".to_owned());
+        assert_eq!(val3, "val3".to_owned());
+
+        assert_eq!(res2.success, true);
+        assert_eq!(res2.leader, node.id);
+        assert_eq!(res3.success, true);
+        assert_eq!(res3.leader, node.id);
+
+        assert_eq!(node.current_term, 1);
+        assert_eq!(node.state, State::Leader);
+        assert_eq!(node.last_applied, node.commit_index);
         Ok(())
     }
 }
