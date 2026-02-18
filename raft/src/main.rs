@@ -7,12 +7,14 @@ use raft::raft::{
 use tokio::sync::mpsc::Sender;
 use tonic::{Request, Response, Status, transport::Server};
 
-use raft::raft_node::{
-    AppendEntriesData, AppendEntriesReplyData, ChangeStateReply, LogEntry, Node, RaftMsg,
+use raft::network_types::OutMsg;
+use raft::raft_node::Node;
+use raft::raft_types::{
+    AppendEntriesData, AppendEntriesReplyData, ChangeStateReply, LogEntry, RaftMsg,
     RequestVoteData, RequestVoteReplyData,
 };
 
-use raft::network_sender::{OutMsg, network_worker};
+use raft::network_sender::network_worker;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -158,7 +160,8 @@ async fn main() -> anyhow::Result<()> {
     let mailbox_clone = mailbox_snd.clone();
     _ = tokio::spawn(async move { network_worker(outbox_rcv, mailbox_clone).await });
 
-    let node: Node = Node::new(args.nodes, outbox_snd, args.id);
+    let persister = raft::state_persister::FilePersistentStorage::new(args.id.clone());
+    let node = Node::new(args.nodes, outbox_snd, args.id, persister).await?;
     _ = tokio::spawn(async move { node.run(mailbox_rcv).await });
 
     let raft = RaftService::new(mailbox_snd.clone());

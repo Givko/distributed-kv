@@ -1,32 +1,9 @@
 use crate::raft::raft_client::RaftClient;
 use crate::raft::{AppendEntriesMessage, Entry, RequestVoteMessage};
-use crate::raft_node::{AppendEntriesReplyData, RaftMsg, RequestVoteReplyData};
+use crate::network_types::OutMsg;
+use crate::raft_types::{AppendEntriesReplyData, RaftMsg, RequestVoteReplyData};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tonic::Request;
-
-pub enum OutMsg {
-    RequestVote {
-        term: u64,
-        peer: String,
-        last_log_index: u64,
-        last_log_term: u64,
-        candidate: String,
-    },
-    AppendEntries {
-        term: u64,
-        peer: String,
-        prev_log_index: u64,
-        prev_log_term: u64,
-        leader_commit: u64,
-        leader_id: String,
-        entries: Vec<LogEntry>,
-    },
-}
-
-pub struct LogEntry {
-    pub term: u64,
-    pub command: String,
-}
 
 pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<RaftMsg>) {
     while let Some(msg) = outbox.recv().await {

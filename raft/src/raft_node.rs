@@ -1,4 +1,10 @@
-use crate::network_sender::OutMsg;
+use crate::network_types::OutMsg;
+pub use crate::raft_types::{
+    AppendEntriesData, AppendEntriesReplyData, ChangeStateReply, RaftMsg, RequestVoteData,
+    RequestVoteReplyData,
+};
+use crate::raft_types::LogEntry;
+use crate::state_persister::{PersistentState, Persister};
 use rand::Rng;
 use std::{collections::HashMap, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -14,78 +20,7 @@ pub enum State {
 }
 
 #[derive(Debug)]
-pub struct LogEntry {
-    pub term: u64,
-    pub command: String,
-}
-
-#[derive(Debug)]
-pub struct RequestVoteData {
-    pub term: u64,
-    pub last_log_index: u64,
-    pub last_log_term: u64,
-    pub candidate: String,
-}
-
-#[derive(Debug)]
-pub struct AppendEntriesData {
-    pub term: u64,
-    pub prev_log_index: u64,
-    pub prev_log_term: u64,
-    pub leader_commit: u64,
-    pub leader_id: String,
-    pub entries: Vec<LogEntry>,
-}
-
-#[derive(Debug)]
-pub struct AppendEntriesReplyData {
-    pub term: u64,
-    pub success: bool,
-    pub peer: String,
-    pub entries_count: u64,
-}
-
-#[derive(Debug)]
-pub struct RequestVoteReplyData {
-    pub term: u64,
-    pub vote: bool,
-}
-
-#[derive(Debug)]
-pub struct ChangeStateReply {
-    pub success: bool,
-    pub leader: String,
-}
-
-pub enum RaftMsg {
-    RequestVoteReply {
-        vote_reply: RequestVoteReplyData,
-        reply_channel: Option<tokio::sync::oneshot::Sender<()>>,
-    },
-    VoteRequest {
-        vote_request: RequestVoteData,
-        reply_channel: Option<tokio::sync::oneshot::Sender<RequestVoteReplyData>>,
-    },
-    AppendEntries {
-        append_request: AppendEntriesData,
-        reply_channel: Option<tokio::sync::oneshot::Sender<AppendEntriesReplyData>>,
-    },
-    AppendEntriesReply {
-        append_reply: AppendEntriesReplyData,
-        reply_channel: Option<tokio::sync::oneshot::Sender<()>>,
-    },
-    ChangeState {
-        command: String,
-        reply_channel: Option<tokio::sync::oneshot::Sender<ChangeStateReply>>,
-    },
-    GetState {
-        key: String,
-        reply_channel: tokio::sync::oneshot::Sender<String>,
-    },
-}
-
-#[derive(Debug)]
-pub struct Node {
+pub struct Node<T> {
     current_term: u64,
     state: State,
     peers: Vec<String>,
@@ -102,17 +37,24 @@ pub struct Node {
 
     state_machine: HashMap<String, String>,
     pending_clients: HashMap<u64, tokio::sync::oneshot::Sender<ChangeStateReply>>,
+
+    state_persister: T,
 }
 
-impl Node {
-    pub fn new(peers: Vec<String>, network_inbox: Sender<OutMsg>, id: String) -> Self {
+impl<T: Persister + Send + Sync> Node<T> {
+    pub async fn new(
+        peers: Vec<String>,
+        network_inbox: Sender<OutMsg>,
+        id: String,
+        state_persister: T,
+    ) -> anyhow::Result<Self> {
         let mut next_index_map = HashMap::new();
         let mut match_index_map = HashMap::new();
         for peer in peers.clone() {
             next_index_map.insert(peer.clone(), 0);
             match_index_map.insert(peer, 0);
         }
-        Node {
+        let mut node = Node {
             leader: String::new(),
             current_term: 0,
             state: State::default(),
@@ -127,7 +69,13 @@ impl Node {
             match_index: match_index_map,
             state_machine: HashMap::new(),
             pending_clients: HashMap::new(),
-        }
+            state_persister: state_persister,
+        };
+        let init_state = node.state_persister.load_state().await?;
+        node.current_term = init_state.current_term;
+        node.voted_for = init_state.voted_for;
+        node.entries = init_state.entries;
+        Ok(node)
     }
 
     pub async fn run(mut self, mut inbox: Receiver<RaftMsg>) -> anyhow::Result<()> {
@@ -152,6 +100,16 @@ impl Node {
                 }
             }
         }
+    }
+    async fn persist_state(&self) -> anyhow::Result<()> {
+        let persistent_state = PersistentState {
+            current_term: self.current_term,
+            voted_for: self.voted_for.clone(),
+            entries: self.entries.clone(),
+        };
+
+        self.state_persister.save_state(&persistent_state).await?;
+        Ok(())
     }
 
     async fn handle_message(&mut self, msg: RaftMsg) -> anyhow::Result<()> {
@@ -205,7 +163,7 @@ impl Node {
                             prev_log_term: self.entries.last().map_or(0, |e| e.term),
                             leader_commit: self.commit_index,
                             leader_id: self.id.clone(),
-                            entries: vec![crate::network_sender::LogEntry {
+                            entries: vec![LogEntry {
                                 term: self.current_term,
                                 command: command.clone(),
                             }],
@@ -243,10 +201,9 @@ impl Node {
         }
 
         for i in self.last_applied + 1..=self.commit_index {
-            let args: Vec<&str> = self.entries[i as usize - 1]
-                .command
-                .split_whitespace()
-                .collect();
+            let command = &self.entries[i as usize - 1].command;
+
+            let args: Vec<&str> = command.split_whitespace().collect();
             let command = args[0];
             let key = args[1];
 
@@ -309,6 +266,7 @@ impl Node {
             self.entries[last_log_index as usize - 1].term
         };
 
+        self.persist_state().await?;
         for peer in peers {
             eprintln!("Sending requestVote to {}", peer);
             let out_msg = OutMsg::RequestVote {
@@ -320,6 +278,7 @@ impl Node {
             };
             self.network_inbox.send(out_msg).await?;
         }
+
         Ok(())
     }
 
@@ -359,6 +318,7 @@ impl Node {
 
         self.voted_for = Some(vote_request.candidate.clone());
         self.state = State::Follower;
+        self.persist_state().await?;
 
         Ok(vote_reply)
     }
@@ -394,6 +354,7 @@ impl Node {
                 entries_count: 0,
             };
 
+            self.persist_state().await?;
             return Ok(reply);
         }
 
@@ -440,6 +401,7 @@ impl Node {
             entries_count: entries_count as u64,
         };
 
+        self.persist_state().await?;
         return Ok(reply);
     }
 
@@ -452,8 +414,10 @@ impl Node {
             self.state = State::Follower;
             self.voted_for = None;
             eprintln!("Stepping down to follower due to higher term in vote reply");
+            self.persist_state().await?;
             return Ok(());
         }
+
         // Ignore stale votes from old terms
         if vote_reply.term != self.current_term {
             eprintln!("Ignoring stale vote from term {}", vote_reply.term);
@@ -537,6 +501,7 @@ impl Node {
             );
             self.voted_for = None;
 
+            self.persist_state().await?;
             return Ok(());
         }
 
@@ -564,7 +529,7 @@ impl Node {
 
         let entries_to_send = self.entries[prev_log_index as usize..]
             .iter()
-            .map(|e| crate::network_sender::LogEntry {
+            .map(|e| LogEntry {
                 term: e.term,
                 command: e.command.clone(),
             })
@@ -597,10 +562,10 @@ impl Node {
         count > (self.peers.len() + 1) / 2
     }
 
-    fn send_to_reply_channel<T>(
+    fn send_to_reply_channel<R>(
         &self,
-        reply_channel: Option<tokio::sync::oneshot::Sender<T>>,
-        reply: T,
+        reply_channel: Option<tokio::sync::oneshot::Sender<R>>,
+        reply: R,
     ) -> anyhow::Result<()> {
         let Some(reply_channel) = reply_channel else {
             return Ok(());
@@ -616,11 +581,109 @@ impl Node {
 mod raft_node_tests {
     use super::*;
 
+    struct TestPersister;
+    struct LoadedStatePersister {
+        state: PersistentState,
+    }
+    struct FailingLoadPersister;
+
+    #[async_trait::async_trait]
+    impl Persister for TestPersister {
+        async fn save_state(&self, _state: &PersistentState) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn load_state(&self) -> anyhow::Result<PersistentState> {
+            Ok(PersistentState {
+                current_term: 0,
+                voted_for: None,
+                entries: vec![],
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Persister for LoadedStatePersister {
+        async fn save_state(&self, _state: &PersistentState) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn load_state(&self) -> anyhow::Result<PersistentState> {
+            Ok(PersistentState {
+                current_term: self.state.current_term,
+                voted_for: self.state.voted_for.clone(),
+                entries: self.state.entries.clone(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Persister for FailingLoadPersister {
+        async fn save_state(&self, _state: &PersistentState) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn load_state(&self) -> anyhow::Result<PersistentState> {
+            Err(anyhow::anyhow!("failed to load state"))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_new_loads_persistent_state() -> anyhow::Result<()> {
+        let peers = vec!["node2".to_string()];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let persister = LoadedStatePersister {
+            state: PersistentState {
+                current_term: 7,
+                voted_for: Some("node3".to_string()),
+                entries: vec![
+                    LogEntry {
+                        term: 5,
+                        command: "set key1 val1".to_string(),
+                    },
+                    LogEntry {
+                        term: 7,
+                        command: "set key2 val2".to_string(),
+                    },
+                ],
+            },
+        };
+
+        let node = Node::new(peers, network_inbox, String::from("node1"), persister).await?;
+
+        assert_eq!(node.current_term, 7);
+        assert_eq!(node.voted_for, Some("node3".to_string()));
+        assert_eq!(node.entries.len(), 2);
+        assert_eq!(node.entries[0].term, 5);
+        assert_eq!(node.entries[0].command, "set key1 val1");
+        assert_eq!(node.entries[1].term, 7);
+        assert_eq!(node.entries[1].command, "set key2 val2");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_new_returns_error_when_state_loading_fails() {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+
+        let result = Node::new(
+            peers,
+            network_inbox,
+            String::from("node1"),
+            FailingLoadPersister,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
     #[tokio::test]
     async fn test_handle_vote_request() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let file_persister = TestPersister {};
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), file_persister).await?;
         let vote_request = RequestVoteData {
             term: 1,
             last_log_index: 0,
@@ -639,7 +702,8 @@ mod raft_node_tests {
     async fn test_handle_vote_request_already_voted() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.voted_for = Some(String::from("node2"));
         let vote_request = RequestVoteData {
             term: 0,
@@ -659,7 +723,8 @@ mod raft_node_tests {
     async fn test_handle_vote_request_log_term_not_up_to_date() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
@@ -682,7 +747,8 @@ mod raft_node_tests {
     async fn test_handle_vote_request_log_index_up_to_date() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
@@ -705,7 +771,8 @@ mod raft_node_tests {
     async fn test_handle_vote_request_voted_for_same_candidate() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.voted_for = Some(String::from("node2"));
         let vote_request = RequestVoteData {
             term: 1,
@@ -725,7 +792,8 @@ mod raft_node_tests {
     async fn test_handle_vote_request_higher_log_index_not_up_to_date() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
@@ -752,7 +820,8 @@ mod raft_node_tests {
     async fn test_handle_vote_request_log_term_mismatch() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
@@ -775,7 +844,8 @@ mod raft_node_tests {
     async fn test_handle_vote_request_stale_term() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 2;
         let vote_request = RequestVoteData {
             term: 1,
@@ -795,7 +865,8 @@ mod raft_node_tests {
     async fn test_handle_request_vote_reply_become_leader() -> anyhow::Result<()> {
         let peers = vec!["node1".to_string(), "node2".to_string()];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 1;
         node.state = State::Candidate { votes: 1 };
         let vote_reply = RequestVoteReplyData {
@@ -813,7 +884,8 @@ mod raft_node_tests {
     async fn test_handle_vote_request_candidate_has_higher_term() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
@@ -840,7 +912,8 @@ mod raft_node_tests {
     async fn test_handle_vote_request_reply_no_majority() -> anyhow::Result<()> {
         let peers = vec!["node1".to_string(), "node2".to_string()];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 1;
         node.state = State::Candidate { votes: 1 };
         let vote_reply = RequestVoteReplyData {
@@ -858,7 +931,8 @@ mod raft_node_tests {
     async fn test_handle_append_entries() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 1;
         node.state = State::Leader;
         let append_request = AppendEntriesData {
@@ -881,7 +955,8 @@ mod raft_node_tests {
     async fn test_handle_append_entries_stale_term() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 1;
         node.state = State::Leader;
         let append_request = AppendEntriesData {
@@ -904,7 +979,8 @@ mod raft_node_tests {
     async fn test_handle_append_entries_stale_request() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 2;
         node.state = State::Leader;
         let append_request = AppendEntriesData {
@@ -927,7 +1003,8 @@ mod raft_node_tests {
     async fn test_handle_append_entries_prev_log_index_high() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 2;
         node.state = State::Leader;
         let append_request = AppendEntriesData {
@@ -950,7 +1027,8 @@ mod raft_node_tests {
     async fn test_handle_append_entries_prev_log_term_mismatch() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 2;
         node.state = State::Leader;
         node.entries.push(LogEntry {
@@ -977,7 +1055,8 @@ mod raft_node_tests {
     async fn test_handle_append_entries_successful_append() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 2;
         node.state = State::Follower;
         node.entries.push(LogEntry {
@@ -1010,7 +1089,8 @@ mod raft_node_tests {
     async fn test_handle_append_entries_conflicting_entries() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 2;
         node.state = State::Follower;
         node.entries.push(LogEntry {
@@ -1052,7 +1132,8 @@ mod raft_node_tests {
     -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 2;
         node.state = State::Follower;
         node.entries.push(LogEntry {
@@ -1084,7 +1165,8 @@ mod raft_node_tests {
     async fn test_handle_append_entries_update_commit_with_entries_length() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 2;
         node.state = State::Follower;
         node.entries.push(LogEntry {
@@ -1118,7 +1200,8 @@ mod raft_node_tests {
     {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 2;
         node.state = State::Follower;
         node.entries.push(LogEntry {
@@ -1156,7 +1239,8 @@ mod raft_node_tests {
     async fn test_handle_append_entries_reply_step_down() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 1;
         node.state = State::Leader;
         let append_reply = AppendEntriesReplyData {
@@ -1176,7 +1260,8 @@ mod raft_node_tests {
     async fn test_handle_append_entries_reply_no_step_down() -> anyhow::Result<()> {
         let peers = vec!["test".to_owned()];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 2;
         node.state = State::Leader;
         node.next_index.insert("test".to_owned(), 1);
@@ -1200,7 +1285,8 @@ mod raft_node_tests {
     {
         let peers = vec!["test".to_owned()];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 2;
         node.next_index.insert("test".to_owned(), 3);
         node.state = State::Leader;
@@ -1239,7 +1325,8 @@ mod raft_node_tests {
     async fn test_handle_append_entries_reply_unsuccess_next_index_stays_1() -> anyhow::Result<()> {
         let peers = vec!["test".to_owned()];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("node1"));
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
         node.current_term = 2;
         node.next_index.insert("test".to_owned(), 1);
         node.state = State::Leader;
@@ -1278,7 +1365,7 @@ mod raft_node_tests {
     async fn test_apply_commands_applies_everything_after_commit_index() -> anyhow::Result<()> {
         let peers = vec!["test".to_owned()];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("self"));
+        let mut node = Node::new(peers, network_inbox, String::from("self"), TestPersister).await?;
         node.current_term = 1;
         node.state = State::Leader;
         node.commit_index = 3;
@@ -1340,7 +1427,7 @@ mod raft_node_tests {
     -> anyhow::Result<()> {
         let peers = vec!["test".to_owned()];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
-        let mut node = Node::new(peers, network_inbox, String::from("self"));
+        let mut node = Node::new(peers, network_inbox, String::from("self"), TestPersister).await?;
         node.current_term = 1;
         node.state = State::Leader;
         node.commit_index = 3;
