@@ -1,9 +1,9 @@
 use crate::network_types::OutMsg;
+use crate::raft_types::LogEntry;
 pub use crate::raft_types::{
     AppendEntriesData, AppendEntriesReplyData, ChangeStateReply, RaftMsg, RequestVoteData,
     RequestVoteReplyData,
 };
-use crate::raft_types::LogEntry;
 use crate::state_persister::{PersistentState, Persister};
 use rand::Rng;
 use std::{collections::HashMap, time::Duration};
@@ -359,7 +359,7 @@ impl<T: Persister + Send + Sync> Node<T> {
         }
 
         // Reset voted_for on receiving heartbeat
-        if self.current_term <= append_request.term {
+        if self.current_term < append_request.term {
             self.current_term = append_request.term;
             self.voted_for = None;
         }
