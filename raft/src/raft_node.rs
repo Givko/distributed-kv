@@ -1486,4 +1486,30 @@ mod raft_node_tests {
         assert_eq!(node.last_applied, node.commit_index);
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_same_term_does_not_reset_voted_for() -> anyhow::Result<()> {
+        let peers = vec![];
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
+        node.current_term = 2;
+        node.voted_for = Some(String::from("node2")); // already voted this term
+        node.state = State::Follower;
+
+        let append_request = AppendEntriesData {
+            term: 2, // same term — heartbeat from current leader
+            prev_log_index: 0,
+            prev_log_term: 0,
+            leader_commit: 0,
+            leader_id: String::from("node2"),
+            entries: vec![],
+        };
+
+        let reply = node.handle_append_entries(append_request).await?;
+        assert!(reply.success);
+        assert_eq!(node.voted_for, Some(String::from("node2"))); // must not be cleared
+        assert_eq!(node.current_term, 2);
+        Ok(())
+    }
 }
