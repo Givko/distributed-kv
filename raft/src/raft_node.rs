@@ -79,6 +79,7 @@ impl<T: Persister + Send + Sync> Node<T> {
         node.current_term = init_state.current_term;
         node.voted_for = init_state.voted_for;
         node.entries = init_state.entries;
+        node.commit_index = init_state.commit_index;
         Ok(node)
     }
 
@@ -132,6 +133,7 @@ impl<T: Persister + Send + Sync> Node<T> {
             current_term: self.current_term,
             voted_for: self.voted_for.clone(),
             entries: self.entries.clone(),
+            commit_index: self.commit_index,
         };
 
         self.state_persister.save_state(&persistent_state).await?;
@@ -644,6 +646,7 @@ mod raft_node_tests {
                 current_term: 0,
                 voted_for: None,
                 entries: vec![],
+                commit_index: 0,
             })
         }
     }
@@ -667,6 +670,7 @@ mod raft_node_tests {
                 current_term: self.state.current_term,
                 voted_for: self.state.voted_for.clone(),
                 entries: self.state.entries.clone(),
+                commit_index: self.state.commit_index,
             })
         }
     }
@@ -698,6 +702,7 @@ mod raft_node_tests {
                 current_term: state.current_term,
                 voted_for: state.voted_for.clone(),
                 entries: state.entries.clone(),
+                commit_index: state.commit_index,
             });
             Ok(())
         }
@@ -715,6 +720,7 @@ mod raft_node_tests {
                 current_term: 0,
                 voted_for: None,
                 entries: vec![],
+                commit_index: 0,
             })
         }
     }
@@ -737,6 +743,7 @@ mod raft_node_tests {
                         command: "set key2 val2".to_string(),
                     },
                 ],
+                commit_index: 2,
             },
         };
 
@@ -749,6 +756,7 @@ mod raft_node_tests {
         assert_eq!(node.entries[0].command, "set key1 val1");
         assert_eq!(node.entries[1].term, 7);
         assert_eq!(node.entries[1].command, "set key2 val2");
+        assert_eq!(node.commit_index, 2);
         Ok(())
     }
 

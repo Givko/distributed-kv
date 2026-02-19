@@ -8,6 +8,8 @@ pub struct PersistentState {
     pub current_term: u64,
     pub voted_for: Option<String>,
     pub entries: Vec<LogEntry>,
+    #[serde(default)]
+    pub commit_index: u64,
 }
 
 #[async_trait::async_trait]
@@ -67,6 +69,7 @@ impl Persister for FilePersistentStorage {
                     current_term: 0,
                     voted_for: None,
                     entries: vec![],
+                    commit_index: 0,
                 });
             }
             Err(error) => return Err(error.into()),
