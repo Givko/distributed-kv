@@ -207,6 +207,9 @@ impl<T: Persister + Send + Sync> Node<T> {
                         term: self.current_term,
                         command,
                     });
+                    self.persist_state()
+                        .await
+                        .expect("Failed to persist state after adding new command");
                     let log_index = self.last_log_index();
                     if let Some(reply_channel) = reply_channel {
                         self.pending_clients.insert(log_index, reply_channel);
@@ -611,12 +614,16 @@ impl<T: Persister + Send + Sync> Node<T> {
 #[cfg(test)]
 mod raft_node_tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     struct TestPersister;
     struct LoadedStatePersister {
         state: PersistentState,
     }
     struct FailingLoadPersister;
+    struct RecordingPersister {
+        saved_state: Arc<Mutex<Option<PersistentState>>>,
+    }
 
     #[async_trait::async_trait]
     impl Persister for TestPersister {
@@ -683,6 +690,35 @@ mod raft_node_tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl Persister for RecordingPersister {
+        async fn save_state(&self, state: &PersistentState) -> anyhow::Result<()> {
+            let mut saved_state = self.saved_state.lock().expect("failed to lock saved state");
+            *saved_state = Some(PersistentState {
+                current_term: state.current_term,
+                voted_for: state.voted_for.clone(),
+                entries: state.entries.clone(),
+            });
+            Ok(())
+        }
+
+        async fn create_snapshot(
+            &self,
+            _last_included_index: u64,
+            _last_included_term: u64,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn load_state(&self) -> anyhow::Result<PersistentState> {
+            Ok(PersistentState {
+                current_term: 0,
+                voted_for: None,
+                entries: vec![],
+            })
+        }
+    }
+
     #[tokio::test]
     async fn test_new_loads_persistent_state() -> anyhow::Result<()> {
         let peers = vec!["node2".to_string()];
@@ -730,6 +766,34 @@ mod raft_node_tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_leader_change_state_persists_new_entry() -> anyhow::Result<()> {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let saved_state = Arc::new(Mutex::new(None));
+        let persister = RecordingPersister {
+            saved_state: saved_state.clone(),
+        };
+        let mut node = Node::new(peers, network_inbox, String::from("node1"), persister).await?;
+        node.state = State::Leader;
+        node.current_term = 3;
+
+        node.handle_message(RaftMsg::ChangeState {
+            command: "set key1 value1".to_string(),
+            reply_channel: None,
+        })
+        .await?;
+
+        let persisted = saved_state.lock().expect("failed to lock saved state");
+        let persisted = persisted
+            .as_ref()
+            .expect("leader write should persist state");
+        assert_eq!(persisted.entries.len(), 1);
+        assert_eq!(persisted.entries[0].term, 3);
+        assert_eq!(persisted.entries[0].command, "set key1 value1");
+        Ok(())
     }
 
     #[tokio::test]
