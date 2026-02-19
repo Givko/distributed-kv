@@ -778,6 +778,98 @@ mod raft_node_tests {
     }
 
     #[tokio::test]
+    async fn test_new_replays_committed_entries_into_state_machine() -> anyhow::Result<()> {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let persister = LoadedStatePersister {
+            state: PersistentState {
+                current_term: 4,
+                voted_for: Some("node2".to_string()),
+                entries: vec![
+                    LogEntry {
+                        term: 4,
+                        command: "set key1 val1".to_string(),
+                    },
+                    LogEntry {
+                        term: 4,
+                        command: "set key2 val2".to_string(),
+                    },
+                    LogEntry {
+                        term: 4,
+                        command: "set key1 val3".to_string(),
+                    },
+                ],
+                commit_index: 2,
+            },
+        };
+
+        let node = Node::new(peers, network_inbox, String::from("node1"), persister).await?;
+
+        let val1 = node
+            .state_machine
+            .get("key1")
+            .expect("missing key1")
+            .to_owned();
+        let val2 = node
+            .state_machine
+            .get("key2")
+            .expect("missing key2")
+            .to_owned();
+
+        assert_eq!(val1, "val1".to_string());
+        assert_eq!(val2, "val2".to_string());
+        assert_eq!(node.last_applied, 2);
+        assert_eq!(node.commit_index, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_new_replays_all_committed_entries_updates_existing_key() -> anyhow::Result<()> {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let persister = LoadedStatePersister {
+            state: PersistentState {
+                current_term: 4,
+                voted_for: Some("node2".to_string()),
+                entries: vec![
+                    LogEntry {
+                        term: 4,
+                        command: "set key1 val1".to_string(),
+                    },
+                    LogEntry {
+                        term: 4,
+                        command: "set key2 val2".to_string(),
+                    },
+                    LogEntry {
+                        term: 4,
+                        command: "set key1 val3".to_string(),
+                    },
+                ],
+                commit_index: 3,
+            },
+        };
+
+        let node = Node::new(peers, network_inbox, String::from("node1"), persister).await?;
+
+        let val1 = node
+            .state_machine
+            .get("key1")
+            .expect("missing key1")
+            .to_owned();
+        let val2 = node
+            .state_machine
+            .get("key2")
+            .expect("missing key2")
+            .to_owned();
+
+        assert_eq!(val1, "val3".to_string());
+        assert_eq!(val2, "val2".to_string());
+        assert_eq!(node.last_applied, 3);
+        assert_eq!(node.commit_index, 3);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_leader_change_state_persists_new_entry() -> anyhow::Result<()> {
         let peers = vec![];
         let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
