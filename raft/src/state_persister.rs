@@ -56,7 +56,21 @@ impl Persister for FilePersistentStorage {
     }
 
     async fn load_state(&self) -> anyhow::Result<PersistentState> {
-        let data = tokio::fs::read_to_string(self.get_state_file_path()).await?;
+        let data = match tokio::fs::read_to_string(self.get_state_file_path()).await {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprint!(
+                    "No state file found for node {}, using default state\n",
+                    self.id
+                );
+                return Ok(PersistentState {
+                    current_term: 0,
+                    voted_for: None,
+                    entries: vec![],
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
         let state: PersistentState = serde_json::from_str(&data)?;
         Ok(state)
     }
