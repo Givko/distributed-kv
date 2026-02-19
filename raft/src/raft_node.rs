@@ -80,6 +80,7 @@ impl<T: Persister + Send + Sync> Node<T> {
         node.voted_for = init_state.voted_for;
         node.entries = init_state.entries;
         node.commit_index = init_state.commit_index;
+        node.apply_commands().await?;
         Ok(node)
     }
 
