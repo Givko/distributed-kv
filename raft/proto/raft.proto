@@ -1,24 +1,77 @@
 syntax = "proto3";
-package raft;
+package proto;
 
+// Raft defines the RPC interface for the Raft consensus algorithm
 service Raft {
+
+  // RequestVote is called by candidates to gather votes
   rpc RequestVote (RequestVoteMessage) returns (RequestVoteReply);
+  
+  // AppendEntries is used for both log replication and heartbeats
   rpc AppendEntries (AppendEntriesMessage) returns (AppendEntriesReply);
+
+  // Used to set a kvp in the state
+  rpc Set (SetMessage) returns (SetReply);
+
+  // Used to get a value based on a key
+  rpc Get (GetMessage) returns (GetReply);
 }
 
+message GetMessage {
+  string key = 1;
+}
+
+message GetReply {
+  string value = 1;
+}
+
+// Command which sets a key with value to the state machine
+message SetMessage {
+  string key   = 1;
+  string value = 2;
+}
+
+// Reply from the set command
+message SetReply {
+  bool success  = 1;
+  string leader = 2;
+}
+
+// Entry represents a single log entry in the Raft log
+message Entry {
+  uint64 term    = 1;
+  string command = 3;
+}
+
+// RequestVoteMessage is sent by candidates to request votes from other nodes
 message RequestVoteMessage {
   uint64 term          = 1;
+  string candidate     = 2;
+
+  uint64 last_log_index = 3;
+  uint64 last_log_term  = 4;
 }
 
+// RequestVoteReply is the response to a RequestVoteMessage
 message RequestVoteReply {
   uint64 term = 1;
   bool   vote = 2;
 }
 
+// AppendEntriesMessage is sent by the leader to replicate log entries and as heartbeats
 message AppendEntriesMessage {
   uint64 term          = 1;
+
+  uint64 prev_log_index  = 2;
+  uint64 prev_log_term   = 3;
+
+  uint64 leader_commit   = 4;
+  string leader_id       = 5;
+
+  repeated Entry entries = 6;
 }
 
+// AppendEntriesReply is the response to an AppendEntriesMessage
 message AppendEntriesReply {
   uint64 term  = 1;
   bool success = 2;

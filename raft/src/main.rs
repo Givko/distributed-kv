@@ -1,14 +1,20 @@
 use clap::Parser;
 use raft::raft::raft_server::{Raft, RaftServer};
-use raft::raft::{AppendEntriesMessage, AppendEntriesReply, RequestVoteMessage, RequestVoteReply};
+use raft::raft::{
+    AppendEntriesMessage, AppendEntriesReply, GetMessage, GetReply, RequestVoteMessage,
+    RequestVoteReply, SetMessage, SetReply,
+};
 use tokio::sync::mpsc::Sender;
 use tonic::{Request, Response, Status, transport::Server};
 
-use raft::raft_node::{
-    AppendEntriesData, AppendEntriesReplyData, Node, RaftMsg, RequestVoteData, RequestVoteReplyData,
+use raft::network_types::OutMsg;
+use raft::raft_node::Node;
+use raft::raft_types::{
+    AppendEntriesData, AppendEntriesReplyData, ChangeStateReply, LogEntry, RaftMsg,
+    RequestVoteData, RequestVoteReplyData,
 };
 
-use raft::network_sender::{OutMsg, network_worker};
+use raft::network_sender::network_worker;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -19,6 +25,9 @@ struct Args {
 
     #[arg(short, long, num_args = 1.., value_delimiter = ',')]
     nodes: Vec<String>,
+
+    #[arg(short, long)]
+    id: String,
 }
 
 #[derive(Debug)]
@@ -28,6 +37,43 @@ pub struct RaftService {
 
 #[tonic::async_trait]
 impl Raft for RaftService {
+    async fn get(&self, request: Request<GetMessage>) -> Result<Response<GetReply>, Status> {
+        let get_command = request.into_inner();
+        let (snd, rcv) = tokio::sync::oneshot::channel::<String>();
+        let raft_msg = RaftMsg::GetState {
+            key: get_command.key,
+            reply_channel: snd,
+        };
+        self.mailbox
+            .send(raft_msg)
+            .await
+            .expect("failed to send raft msg");
+        let value = rcv.await.expect("did not rcv from reply channel");
+        Ok(Response::new(GetReply { value }))
+    }
+    async fn set(&self, _request: Request<SetMessage>) -> Result<Response<SetReply>, Status> {
+        let msg = _request.into_inner();
+        eprintln!("set {}: {}", msg.key, msg.value);
+
+        let command = format!("SET {} {}", msg.key, msg.value);
+        let (snd, rcv) = tokio::sync::oneshot::channel::<ChangeStateReply>();
+        let raft_msg = RaftMsg::ChangeState {
+            command,
+            reply_channel: Some(snd),
+        };
+        self.mailbox
+            .send(raft_msg)
+            .await
+            .expect("failed to send to raft");
+        let reply = rcv.await.expect("failed to rcv reply");
+        if !reply.success {
+            return Err(Status::cancelled("node is not leader")); // TODO: return leader URL 
+        }
+        Ok(Response::new(SetReply {
+            success: true,
+            leader: String::new(), // TODO: Add leader to response
+        }))
+    }
     async fn request_vote(
         &self,
         request: Request<RequestVoteMessage>,
@@ -35,6 +81,9 @@ impl Raft for RaftService {
         let (snd, rcv) = tokio::sync::oneshot::channel::<RequestVoteReplyData>();
         let message_data = RequestVoteData {
             term: request.get_ref().term,
+            last_log_index: request.get_ref().last_log_index,
+            last_log_term: request.get_ref().last_log_term,
+            candidate: request.get_ref().candidate.clone(),
         };
         let vote_message = RaftMsg::VoteRequest {
             vote_request: message_data,
@@ -60,7 +109,21 @@ impl Raft for RaftService {
     ) -> Result<Response<AppendEntriesReply>, Status> {
         let message = request.into_inner();
         let (snd, rcv) = tokio::sync::oneshot::channel::<AppendEntriesReplyData>();
-        let append_entries_daata = AppendEntriesData { term: message.term };
+        let append_entries_daata = AppendEntriesData {
+            term: message.term,
+            prev_log_index: message.prev_log_index,
+            prev_log_term: message.prev_log_term,
+            leader_commit: message.leader_commit,
+            leader_id: message.leader_id.clone(),
+            entries: message
+                .entries
+                .iter()
+                .map(|e| LogEntry {
+                    term: e.term,
+                    command: e.command.clone(),
+                })
+                .collect(),
+        };
         let append_message = RaftMsg::AppendEntries {
             append_request: append_entries_daata,
             reply_channel: Some(snd),
@@ -86,7 +149,7 @@ impl RaftService {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     eprintln!("{}", args.port);
     eprintln!("{:?}", args.nodes);
@@ -97,7 +160,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mailbox_clone = mailbox_snd.clone();
     _ = tokio::spawn(async move { network_worker(outbox_rcv, mailbox_clone).await });
 
-    let node: Node = Node::new(args.nodes, outbox_snd);
+    let persister = raft::state_persister::FilePersistentStorage::new(args.id.clone());
+    let node = Node::new(args.nodes, outbox_snd, args.id, persister).await?;
     _ = tokio::spawn(async move { node.run(mailbox_rcv).await });
 
     let raft = RaftService::new(mailbox_snd.clone());
