@@ -14,6 +14,11 @@ pub struct PersistentState {
 pub trait Persister {
     async fn save_state(&self, state: &PersistentState) -> anyhow::Result<()>;
     async fn load_state(&self) -> anyhow::Result<PersistentState>;
+    async fn create_snapshot(
+        &self,
+        last_included_index: u64,
+        last_included_term: u64,
+    ) -> anyhow::Result<()>;
 }
 
 pub struct FilePersistentStorage {
@@ -38,6 +43,15 @@ impl Persister for FilePersistentStorage {
         file.write_all(serialized_state.as_bytes()).await?;
         file.flush().await?;
         file.sync_all().await?;
+        Ok(())
+    }
+
+    async fn create_snapshot(
+        &self,
+        _last_included_index: u64,
+        _last_included_term: u64,
+    ) -> anyhow::Result<()> {
+        // For simplicity, we won't implement snapshotting in this example.
         Ok(())
     }
 

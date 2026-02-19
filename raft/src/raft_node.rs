@@ -34,6 +34,8 @@ pub struct Node<T> {
     last_applied: u64,
     next_index: HashMap<String, u64>,
     match_index: HashMap<String, u64>,
+    snapshot_last_index: u64,
+    snapshot_last_term: u64,
 
     state_machine: HashMap<String, String>,
     pending_clients: HashMap<u64, tokio::sync::oneshot::Sender<ChangeStateReply>>,
@@ -67,6 +69,8 @@ impl<T: Persister + Send + Sync> Node<T> {
             last_applied: 0,
             next_index: next_index_map,
             match_index: match_index_map,
+            snapshot_last_index: 0,
+            snapshot_last_term: 0,
             state_machine: HashMap::new(),
             pending_clients: HashMap::new(),
             state_persister: state_persister,
@@ -101,6 +105,28 @@ impl<T: Persister + Send + Sync> Node<T> {
             }
         }
     }
+
+    fn last_log_index(&self) -> u64 {
+        self.snapshot_last_index + self.entries.len() as u64
+    }
+
+    fn get_log_entry(&self, index: u64) -> Option<&LogEntry> {
+        if index <= self.snapshot_last_index {
+            None
+        } else {
+            self.entries
+                .get((index - self.snapshot_last_index - 1) as usize)
+        }
+    }
+
+    fn get_log_term(&self, index: u64) -> u64 {
+        if index == self.snapshot_last_index {
+            self.snapshot_last_term
+        } else {
+            self.get_log_entry(index).map_or(0, |e| e.term)
+        }
+    }
+
     async fn persist_state(&self) -> anyhow::Result<()> {
         let persistent_state = PersistentState {
             current_term: self.current_term,
@@ -155,12 +181,17 @@ impl<T: Persister + Send + Sync> Node<T> {
                     };
                     self.send_to_reply_channel(reply_channel, reply)?;
                 } else {
+                    let prev_log_index = self.last_log_index();
+                    let prev_log_term = self
+                        .entries
+                        .last()
+                        .map_or(self.snapshot_last_term, |e| e.term);
                     for peer in &self.peers {
                         let append_entries = OutMsg::AppendEntries {
                             term: self.current_term,
                             peer: peer.clone(),
-                            prev_log_index: self.entries.len() as u64,
-                            prev_log_term: self.entries.last().map_or(0, |e| e.term),
+                            prev_log_index,
+                            prev_log_term,
                             leader_commit: self.commit_index,
                             leader_id: self.id.clone(),
                             entries: vec![LogEntry {
@@ -176,7 +207,7 @@ impl<T: Persister + Send + Sync> Node<T> {
                         term: self.current_term,
                         command,
                     });
-                    let log_index = self.entries.len() as u64;
+                    let log_index = self.last_log_index();
                     if let Some(reply_channel) = reply_channel {
                         self.pending_clients.insert(log_index, reply_channel);
                     }
@@ -201,7 +232,8 @@ impl<T: Persister + Send + Sync> Node<T> {
         }
 
         for i in self.last_applied + 1..=self.commit_index {
-            let command = &self.entries[i as usize - 1].command;
+            let log_entry = self.get_log_entry(i);
+            let command = &log_entry.unwrap().command;
 
             let args: Vec<&str> = command.split_whitespace().collect();
             let command = args[0];
@@ -227,18 +259,18 @@ impl<T: Persister + Send + Sync> Node<T> {
     async fn send_heartbeat(&self) -> anyhow::Result<()> {
         // Placeholder for heartbeat logic
         for peer in &self.peers {
-            let prev_log_index = self.entries.len() as u64;
+            let prev_log_index = self.last_log_index();
+            let prev_log_term = self
+                .entries
+                .last()
+                .map_or(self.snapshot_last_term, |e| e.term);
             // If we're the leader, we don't need to run the election timer
             let out_msg = OutMsg::AppendEntries {
                 term: self.current_term as u64,
                 leader_id: self.id.clone(),
                 entries: vec![],
                 prev_log_index,
-                prev_log_term: if self.entries.is_empty() {
-                    0
-                } else {
-                    self.entries[self.entries.len() - 1].term
-                },
+                prev_log_term,
                 leader_commit: self.commit_index,
                 peer: peer.clone(),
             };
@@ -259,12 +291,11 @@ impl<T: Persister + Send + Sync> Node<T> {
         );
 
         let peers = &self.peers;
-        let last_log_index = self.entries.len() as u64;
-        let last_log_term = if self.entries.is_empty() {
-            0
-        } else {
-            self.entries[last_log_index as usize - 1].term
-        };
+        let last_log_index = self.last_log_index();
+        let last_log_term = self
+            .entries
+            .last()
+            .map_or(self.snapshot_last_term, |e| e.term);
 
         self.persist_state().await?;
         for peer in peers {
@@ -272,7 +303,7 @@ impl<T: Persister + Send + Sync> Node<T> {
             let out_msg = OutMsg::RequestVote {
                 term: self.current_term as u64,
                 peer: peer.clone(),
-                last_log_index: last_log_index as u64,
+                last_log_index,
                 last_log_term,
                 candidate: self.id.clone(),
             };
@@ -297,11 +328,16 @@ impl<T: Persister + Send + Sync> Node<T> {
             Some(candidate) => candidate == &vote_request.candidate,
             None => false,
         };
+        let last_log_term = self
+            .entries
+            .last()
+            .map_or(self.snapshot_last_term, |e| e.term);
+
         if (self.voted_for.is_some() && !voted_for_candidate)
             || self.current_term > vote_request.term
-            || (self.entries.last().map_or(0, |e| e.term) == vote_request.last_log_term
-                && self.entries.len() > vote_request.last_log_index as usize)
-            || self.entries.last().map_or(0, |e| e.term) > vote_request.last_log_term
+            || (last_log_term == vote_request.last_log_term
+                && self.last_log_index() > vote_request.last_log_index)
+            || last_log_term > vote_request.last_log_term
         {
             let vote = RequestVoteReplyData {
                 term: self.current_term as u64,
@@ -328,13 +364,9 @@ impl<T: Persister + Send + Sync> Node<T> {
         append_request: AppendEntriesData,
     ) -> anyhow::Result<AppendEntriesReplyData> {
         if self.current_term > append_request.term
-            || self.entries.len() < append_request.prev_log_index as usize
+            || self.last_log_index() < append_request.prev_log_index
             || (append_request.prev_log_index != 0
-                && self
-                    .entries
-                    .get(append_request.prev_log_index as usize - 1)
-                    .map_or(0, |e| e.term)
-                    != append_request.prev_log_term)
+                && self.get_log_term(append_request.prev_log_index) != append_request.prev_log_term)
         {
             eprintln!("current_term {}", self.current_term.clone());
             eprintln!("prev_log_index {}", append_request.prev_log_index.clone());
@@ -372,10 +404,11 @@ impl<T: Persister + Send + Sync> Node<T> {
 
         // Remove conflicting entries
         if append_request.prev_log_index != 0
-            && self.entries.len() > append_request.prev_log_index as usize
+            && self.last_log_index() > append_request.prev_log_index
+            && append_request.prev_log_index >= self.snapshot_last_index
         {
-            self.entries
-                .truncate(append_request.prev_log_index as usize);
+            let truncate_to = (append_request.prev_log_index - self.snapshot_last_index) as usize;
+            self.entries.truncate(truncate_to);
         }
 
         let entries_count = append_request.entries.len();
@@ -389,8 +422,7 @@ impl<T: Persister + Send + Sync> Node<T> {
 
         // Update commit index
         if append_request.leader_commit > self.commit_index {
-            self.commit_index =
-                std::cmp::min(self.entries.len() as u64, append_request.leader_commit);
+            self.commit_index = std::cmp::min(self.last_log_index(), append_request.leader_commit);
         }
 
         let reply = AppendEntriesReplyData {
@@ -446,9 +478,9 @@ impl<T: Persister + Send + Sync> Node<T> {
             self.current_term
         );
 
-        let next_index = self.entries.len() + 1;
+        let next_index = self.last_log_index() + 1;
         for peer in &self.peers {
-            self.next_index.insert(peer.clone(), next_index as u64);
+            self.next_index.insert(peer.clone(), next_index);
             self.match_index.insert(peer.clone(), 0);
         }
 
@@ -474,18 +506,18 @@ impl<T: Persister + Send + Sync> Node<T> {
             self.match_index
                 .insert(append_entries_reply_data.peer.clone(), match_index);
 
-            for log_index in self.commit_index + 1..=self.entries.len() as u64 {
+            for log_index in self.commit_index + 1..=self.last_log_index() {
                 let mut count = 1; // self
                 for (_, value) in self.match_index.iter() {
-                    if *value >= log_index as u64 {
+                    if *value >= log_index {
                         count += 1;
                     }
                 }
 
                 if self.is_majority(count)
-                    && self.entries[log_index as usize - 1].term == self.current_term
+                    && self.get_log_entry(log_index).map_or(0, |e| e.term) == self.current_term
                 {
-                    self.commit_index = log_index as u64
+                    self.commit_index = log_index
                 }
             }
 
@@ -519,15 +551,14 @@ impl<T: Persister + Send + Sync> Node<T> {
         }
 
         let prev_log_index = next_index - 1;
-        let mut prev_log_term = 0;
-        if prev_log_index > 0 {
-            prev_log_term = self
-                .entries
-                .get(prev_log_index as usize - 1)
-                .map_or(0, |e| e.term);
-        }
+        let prev_log_term = self.get_log_term(prev_log_index);
 
-        let entries_to_send = self.entries[prev_log_index as usize..]
+        // TODO: if prev_log_index < snapshot_last_index, we need InstallSnapshot instead
+        // For now this case shouldn't occur in normal operation>>
+        let start_index = (prev_log_index.saturating_sub(self.snapshot_last_index) as usize)
+            .min(self.entries.len());
+
+        let entries_to_send = self.entries[start_index..]
             .iter()
             .map(|e| LogEntry {
                 term: e.term,
@@ -593,6 +624,14 @@ mod raft_node_tests {
             Ok(())
         }
 
+        async fn create_snapshot(
+            &self,
+            _last_included_index: u64,
+            _last_included_term: u64,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         async fn load_state(&self) -> anyhow::Result<PersistentState> {
             Ok(PersistentState {
                 current_term: 0,
@@ -608,6 +647,14 @@ mod raft_node_tests {
             Ok(())
         }
 
+        async fn create_snapshot(
+            &self,
+            _last_included_index: u64,
+            _last_included_term: u64,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         async fn load_state(&self) -> anyhow::Result<PersistentState> {
             Ok(PersistentState {
                 current_term: self.state.current_term,
@@ -620,6 +667,14 @@ mod raft_node_tests {
     #[async_trait::async_trait]
     impl Persister for FailingLoadPersister {
         async fn save_state(&self, _state: &PersistentState) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn create_snapshot(
+            &self,
+            _last_included_index: u64,
+            _last_included_term: u64,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
 
@@ -675,6 +730,67 @@ mod raft_node_tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_uses_snapshot_index_and_term_for_prev_log_match()
+    -> anyhow::Result<()> {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
+        node.current_term = 4;
+        node.snapshot_last_index = 5;
+        node.snapshot_last_term = 3;
+
+        let append_request = AppendEntriesData {
+            term: 4,
+            prev_log_index: 5,
+            prev_log_term: 3,
+            leader_commit: 10,
+            leader_id: String::from("node2"),
+            entries: vec![LogEntry {
+                term: 4,
+                command: "set key val".to_string(),
+            }],
+        };
+
+        let reply = node.handle_append_entries(append_request).await?;
+        assert!(reply.success);
+        assert_eq!(node.entries.len(), 1);
+        assert_eq!(node.last_log_index(), 6);
+        assert_eq!(node.commit_index, 6);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_rejects_when_snapshot_prev_log_term_mismatches()
+    -> anyhow::Result<()> {
+        let peers = vec![];
+        let (network_inbox, _network_outbox) = tokio::sync::mpsc::channel(100);
+        let mut node =
+            Node::new(peers, network_inbox, String::from("node1"), TestPersister).await?;
+        node.current_term = 4;
+        node.snapshot_last_index = 5;
+        node.snapshot_last_term = 3;
+
+        let append_request = AppendEntriesData {
+            term: 4,
+            prev_log_index: 5,
+            prev_log_term: 9,
+            leader_commit: 10,
+            leader_id: String::from("node2"),
+            entries: vec![LogEntry {
+                term: 4,
+                command: "set key val".to_string(),
+            }],
+        };
+
+        let reply = node.handle_append_entries(append_request).await?;
+        assert!(!reply.success);
+        assert!(node.entries.is_empty());
+        assert_eq!(node.last_log_index(), 5);
+        Ok(())
     }
 
     #[tokio::test]
