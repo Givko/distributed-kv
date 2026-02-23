@@ -1,10 +1,10 @@
-use crate::network_types::OutMsg;
-use crate::raft_types::LogEntry;
-pub use crate::raft_types::{
+use super::network_types::OutMsg;
+use super::raft_types::LogEntry;
+use super::raft_types::{
     AppendEntriesData, AppendEntriesReplyData, ChangeStateReply, RaftMsg, RequestVoteData,
     RequestVoteReplyData,
 };
-use crate::state_persister::{PersistentState, Persister};
+use super::state_persister::{PersistentState, Persister};
 use rand::Rng;
 use std::{collections::HashMap, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};

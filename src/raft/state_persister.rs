@@ -1,4 +1,4 @@
-use crate::raft_types::LogEntry;
+use super::raft_types::LogEntry;
 use serde::{Deserialize, Serialize};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
