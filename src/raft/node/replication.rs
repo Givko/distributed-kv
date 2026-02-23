@@ -13,7 +13,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine + std::fmt::Debug> Node<T, SM
                 .last()
                 .map_or(self.snapshot_last_term, |e| e.term);
             let out_msg = OutMsg::AppendEntries {
-                term: self.current_term as u64,
+                term: self.current_term,
                 leader_id: self.id.clone(),
                 entries: vec![],
                 prev_log_index,
@@ -48,7 +48,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine + std::fmt::Debug> Node<T, SM
 
             self.persist_state().await?;
             return Ok(AppendEntriesReplyData {
-                term: self.current_term as u64,
+                term: self.current_term,
                 success: false,
                 peer: self.id.clone(),
                 entries_count: 0,
@@ -94,7 +94,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine + std::fmt::Debug> Node<T, SM
 
         self.persist_state().await?;
         Ok(AppendEntriesReplyData {
-            term: self.current_term as u64,
+            term: self.current_term,
             success: true,
             peer: self.id.clone(),
             entries_count: entries_count as u64,
@@ -187,7 +187,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine + std::fmt::Debug> Node<T, SM
             .insert(append_entries_reply_data.peer.clone(), next_index);
 
         let append_entries = OutMsg::AppendEntries {
-            term: self.current_term as u64,
+            term: self.current_term,
             peer: append_entries_reply_data.peer,
             prev_log_index,
             prev_log_term,

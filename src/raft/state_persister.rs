@@ -61,8 +61,8 @@ impl Persister for FilePersistentStorage {
         let data = match tokio::fs::read_to_string(self.get_state_file_path()).await {
             Ok(data) => data,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                eprint!(
-                    "No state file found for node {}, using default state\n",
+                eprintln!(
+                    "No state file found for node {}, using default state",
                     self.id
                 );
                 return Ok(PersistentState {

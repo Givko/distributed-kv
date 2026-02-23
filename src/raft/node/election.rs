@@ -26,7 +26,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine + std::fmt::Debug> Node<T, SM
         for peer in peers {
             eprintln!("Sending requestVote to {}", peer);
             let out_msg = OutMsg::RequestVote {
-                term: self.current_term as u64,
+                term: self.current_term,
                 peer: peer.clone(),
                 last_log_index,
                 last_log_term,
@@ -65,7 +65,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine + std::fmt::Debug> Node<T, SM
             || last_log_term > vote_request.last_log_term
         {
             return Ok(RequestVoteReplyData {
-                term: self.current_term as u64,
+                term: self.current_term,
                 vote: false,
             });
         }
@@ -75,7 +75,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine + std::fmt::Debug> Node<T, SM
         self.persist_state().await?;
 
         Ok(RequestVoteReplyData {
-            term: self.current_term as u64,
+            term: self.current_term,
             vote: true,
         })
     }

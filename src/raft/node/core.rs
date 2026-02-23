@@ -231,7 +231,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine + std::fmt::Debug> Node<T, SM
     }
 
     pub(super) fn is_majority(&self, count: usize) -> bool {
-        count > (self.peers.len() + 1) / 2
+        count > self.peers.len().div_ceil(2)
     }
 
     pub(super) fn send_to_reply_channel<R>(
