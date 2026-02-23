@@ -1,19 +1,16 @@
 use std::collections::HashMap;
 
+use crate::raft::storage_engine::StorageEngine;
+
+/// In-memory key-value store backed by a `HashMap<String, String>`.
 #[derive(Debug, Default)]
-pub struct StateMachine {
+pub struct MemKv {
     data: HashMap<String, String>,
 }
 
-impl StateMachine {
-    pub fn new() -> Self {
-        StateMachine {
-            data: HashMap::new(),
-        }
-    }
-
-    /// Apply a command string of the form "SET key value" to the state machine.
-    pub fn apply(&mut self, command: &str) {
+impl StorageEngine for MemKv {
+    /// Apply a command of the form `SET <key> <value>`.
+    fn apply(&mut self, command: &str) {
         let args: Vec<&str> = command.split_whitespace().collect();
         if args.len() < 2 {
             return;
@@ -26,10 +23,12 @@ impl StateMachine {
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<&String> {
+    fn get(&self, key: &str) -> Option<&String> {
         self.data.get(key)
     }
+}
 
+impl MemKv {
     /// Direct insert — intended for test setup only.
     pub fn insert(&mut self, key: String, value: String) {
         self.data.insert(key, value);

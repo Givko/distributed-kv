@@ -8,12 +8,11 @@ use tokio::sync::mpsc::Sender;
 use tonic::{Request, Response, Status, transport::Server};
 
 use distributed_kv::raft::network_types::OutMsg;
-use distributed_kv::raft::node::Node;
+use distributed_kv::MemKvNode;
 use distributed_kv::raft::raft_types::{
     AppendEntriesData, AppendEntriesReplyData, ChangeStateReply, LogEntry, RaftMsg,
     RequestVoteData, RequestVoteReplyData,
 };
-
 use distributed_kv::raft::network_sender::network_worker;
 
 #[derive(Parser, Debug)]
@@ -161,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
     _ = tokio::spawn(async move { network_worker(outbox_rcv, mailbox_clone).await });
 
     let persister = distributed_kv::raft::state_persister::FilePersistentStorage::new(args.id.clone());
-    let node = Node::new(args.nodes, outbox_snd, args.id, persister).await?;
+    let node = MemKvNode::new(args.nodes, outbox_snd, args.id, persister, distributed_kv::storage::memkv::MemKv::default()).await?;
     _ = tokio::spawn(async move { node.run(mailbox_rcv).await });
 
     let raft = RaftService::new(mailbox_snd.clone());

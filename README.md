@@ -117,22 +117,25 @@ I'm intentionally keeping this to one Raft group so I can go deep on correctness
 ```
 src/
 ├── main.rs                   # CLI args, gRPC server setup, actor wiring
-├── lib.rs                    # Crate root — exposes the raft module
+├── lib.rs                    # Crate root — concrete type aliases (MemKvNode, ...)
+├── storage/
+│   ├── mod.rs                # Module declarations + re-exports (StorageEngine)
+│   ├── storage_engine.rs     # StorageEngine trait (apply, get)
+│   └── memkv.rs              # In-memory HashMap implementation of StorageEngine
 └── raft/
     ├── mod.rs                # Module declarations + generated proto inclusion
     ├── raft_types.rs         # Message types, log entries, RPC data structures
     ├── network_sender.rs     # Outbound RPC worker (spawns per-peer tasks)
     ├── network_types.rs      # Outbound message enum (RequestVote, AppendEntries)
-    ├── state_persister.rs    # Persistence trait + file-based JSON implementation
+    ├── state_persister.rs    # Persister trait + file-based JSON implementation
     ├── proto/
     │   └── raft.proto        # gRPC service definition
     └── node/
         ├── mod.rs            # Module declarations + re-exports (Node, State)
-        ├── core.rs           # Node struct, actor loop, core handlers, tests
+        ├── core.rs           # Node<T, SM> struct, actor loop, core handlers, tests
         ├── election.rs       # Leader election (RequestVote send/receive)
         ├── replication.rs    # Log replication (AppendEntries send/receive)
-        ├── log.rs            # Log helpers (last_log_index, get_log_entry, get_log_term)
-        └── state_machine.rs  # In-memory key-value state machine (HashMap)
+        └── log.rs            # Log helpers (last_log_index, get_log_entry, get_log_term)
 ```
 
 ## Running a 3-Node Cluster
