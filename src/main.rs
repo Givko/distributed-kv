@@ -8,7 +8,7 @@ use tokio::sync::mpsc::Sender;
 use tonic::{Request, Response, Status, transport::Server};
 
 use distributed_kv::raft::network_types::OutMsg;
-use distributed_kv::raft::raft_node::Node;
+use distributed_kv::raft::node::Node;
 use distributed_kv::raft::raft_types::{
     AppendEntriesData, AppendEntriesReplyData, ChangeStateReply, LogEntry, RaftMsg,
     RequestVoteData, RequestVoteReplyData,
