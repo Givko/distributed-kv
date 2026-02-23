@@ -116,15 +116,23 @@ I'm intentionally keeping this to one Raft group so I can go deep on correctness
 
 ```
 src/
-├── main.rs              # CLI args, gRPC server setup, actor wiring
-├── lib.rs               # Module declarations
-├── raft_node.rs         # Core Raft state machine (actor loop + tests)
-├── raft_types.rs        # Message types, log entries, RPC data structures
-├── network_sender.rs    # Outbound RPC worker (spawns per-peer tasks)
-├── network_types.rs     # Outbound message enum (RequestVote, AppendEntries)
-├── state_persister.rs   # Persistence trait + file-based JSON implementation
-└── proto/
-    └── raft.proto       # gRPC service definition
+├── main.rs                   # CLI args, gRPC server setup, actor wiring
+├── lib.rs                    # Crate root — exposes the raft module
+└── raft/
+    ├── mod.rs                # Module declarations + generated proto inclusion
+    ├── raft_types.rs         # Message types, log entries, RPC data structures
+    ├── network_sender.rs     # Outbound RPC worker (spawns per-peer tasks)
+    ├── network_types.rs      # Outbound message enum (RequestVote, AppendEntries)
+    ├── state_persister.rs    # Persistence trait + file-based JSON implementation
+    ├── proto/
+    │   └── raft.proto        # gRPC service definition
+    └── node/
+        ├── mod.rs            # Module declarations + re-exports (Node, State)
+        ├── core.rs           # Node struct, actor loop, core handlers, tests
+        ├── election.rs       # Leader election (RequestVote send/receive)
+        ├── replication.rs    # Log replication (AppendEntries send/receive)
+        ├── log.rs            # Log helpers (last_log_index, get_log_entry, get_log_term)
+        └── state_machine.rs  # In-memory key-value state machine (HashMap)
 ```
 
 ## Running a 3-Node Cluster
