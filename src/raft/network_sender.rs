@@ -1,7 +1,7 @@
-use crate::raft::raft_client::RaftClient;
-use crate::raft::{AppendEntriesMessage, Entry, RequestVoteMessage};
-use crate::network_types::OutMsg;
-use crate::raft_types::{AppendEntriesReplyData, RaftMsg, RequestVoteReplyData};
+use crate::raft::proto::raft_client::RaftClient;
+use crate::raft::proto::{AppendEntriesMessage, Entry, RequestVoteMessage};
+use super::network_types::OutMsg;
+use super::raft_types::{AppendEntriesReplyData, RaftMsg, RequestVoteReplyData};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tonic::Request;
 

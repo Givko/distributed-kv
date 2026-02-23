@@ -1,20 +1,20 @@
 use clap::Parser;
-use raft::raft::raft_server::{Raft, RaftServer};
-use raft::raft::{
+use distributed_kv::raft::proto::raft_server::{Raft, RaftServer};
+use distributed_kv::raft::proto::{
     AppendEntriesMessage, AppendEntriesReply, GetMessage, GetReply, RequestVoteMessage,
     RequestVoteReply, SetMessage, SetReply,
 };
 use tokio::sync::mpsc::Sender;
 use tonic::{Request, Response, Status, transport::Server};
 
-use raft::network_types::OutMsg;
-use raft::raft_node::Node;
-use raft::raft_types::{
+use distributed_kv::raft::network_types::OutMsg;
+use distributed_kv::raft::raft_node::Node;
+use distributed_kv::raft::raft_types::{
     AppendEntriesData, AppendEntriesReplyData, ChangeStateReply, LogEntry, RaftMsg,
     RequestVoteData, RequestVoteReplyData,
 };
 
-use raft::network_sender::network_worker;
+use distributed_kv::raft::network_sender::network_worker;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -160,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
     let mailbox_clone = mailbox_snd.clone();
     _ = tokio::spawn(async move { network_worker(outbox_rcv, mailbox_clone).await });
 
-    let persister = raft::state_persister::FilePersistentStorage::new(args.id.clone());
+    let persister = distributed_kv::raft::state_persister::FilePersistentStorage::new(args.id.clone());
     let node = Node::new(args.nodes, outbox_snd, args.id, persister).await?;
     _ = tokio::spawn(async move { node.run(mailbox_rcv).await });
 

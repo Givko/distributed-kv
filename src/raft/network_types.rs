@@ -1,4 +1,4 @@
-use crate::raft_types::LogEntry;
+use super::raft_types::LogEntry;
 
 pub enum OutMsg {
     RequestVote {
