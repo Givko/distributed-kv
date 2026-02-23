@@ -2,8 +2,9 @@ use super::{Node, State};
 use crate::raft::network_types::OutMsg;
 use crate::raft::raft_types::{RequestVoteData, RequestVoteReplyData};
 use crate::raft::state_persister::Persister;
+use crate::raft::storage_engine::StorageEngine;
 
-impl<T: Persister + Send + Sync> Node<T> {
+impl<T: Persister + Send + Sync, SM: StorageEngine + std::fmt::Debug> Node<T, SM> {
     pub(super) async fn start_election(&mut self) -> anyhow::Result<()> {
         eprintln!("Election timeout, starting election");
         self.current_term += 1;
