@@ -119,11 +119,11 @@ src/
 ├── main.rs                   # CLI args, gRPC server setup, actor wiring
 ├── lib.rs                    # Crate root — concrete type aliases (MemKvNode, ...)
 ├── storage/
-│   ├── mod.rs                # Module declarations + re-exports (StorageEngine)
-│   ├── storage_engine.rs     # StorageEngine trait (apply, get)
-│   └── memkv.rs              # In-memory HashMap implementation of StorageEngine
+│   ├── mod.rs                # Module declarations
+│   └── memkv.rs              # In-memory HashMap implementing raft::StorageEngine
 └── raft/
     ├── mod.rs                # Module declarations + generated proto inclusion
+    ├── storage_engine.rs     # StorageEngine trait — defined here, implemented in storage/
     ├── raft_types.rs         # Message types, log entries, RPC data structures
     ├── network_sender.rs     # Outbound RPC worker (spawns per-peer tasks)
     ├── network_types.rs      # Outbound message enum (RequestVote, AppendEntries)
