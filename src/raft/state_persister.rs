@@ -41,10 +41,12 @@ impl FilePersistentStorage {
 impl Persister for FilePersistentStorage {
     async fn save_state(&self, state: &PersistentState) -> anyhow::Result<()> {
         let serialized_state = serde_json::to_string(state)?;
-        let mut file = File::create(self.get_state_file_path()).await?;
+        let tmp_file_path = format!("{}.tmp", self.get_state_file_path());
+        let mut file = File::create(&tmp_file_path).await?;
         file.write_all(serialized_state.as_bytes()).await?;
         file.flush().await?;
         file.sync_all().await?;
+        tokio::fs::rename(tmp_file_path, self.get_state_file_path()).await?;
         Ok(())
     }
 
