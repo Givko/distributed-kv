@@ -1,9 +1,9 @@
 use super::Node;
 use crate::raft::raft_types::LogEntry;
 use crate::raft::state_persister::Persister;
-use crate::raft::storage_engine::StorageEngine;
+use crate::raft::state_machine::StorageEngine;
 
-impl<T: Persister + Send + Sync, SM: StorageEngine + std::fmt::Debug> Node<T, SM> {
+impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     pub(super) fn last_log_index(&self) -> u64 {
         self.snapshot_last_index + self.entries.len() as u64
     }
