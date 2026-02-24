@@ -2,9 +2,9 @@ use super::{Node, State};
 use crate::raft::network_types::OutMsg;
 use crate::raft::raft_types::{AppendEntriesData, AppendEntriesReplyData, LogEntry};
 use crate::raft::state_persister::Persister;
-use crate::raft::storage_engine::StorageEngine;
+use crate::raft::state_machine::StorageEngine;
 
-impl<T: Persister + Send + Sync, SM: StorageEngine + std::fmt::Debug> Node<T, SM> {
+impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     pub(super) async fn send_heartbeat(&self) -> anyhow::Result<()> {
         for peer in &self.peers {
             let prev_log_index = self.last_log_index();
