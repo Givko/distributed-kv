@@ -19,6 +19,13 @@ impl LSMTree<Wal> {
     pub fn new() -> Self {
         Self::with_wal(Wal::new(PathBuf::from("wal.log")))
     }
+
+    /// Creates an LSMTree whose WAL file is named `<sanitized_id>-wal.log`,
+    /// where the node ID (e.g. `127.0.0.1:5051`) has `:` and `.` replaced by `_`.
+    pub fn with_node_id(id: &str) -> Self {
+        let sanitized = id.replace(['.', ':'], "_");
+        Self::with_wal(Wal::new(PathBuf::from(format!("{sanitized}-wal.log"))))
+    }
 }
 
 impl<W: WalStorage> LSMTree<W> {

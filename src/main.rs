@@ -160,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
     _ = tokio::spawn(async move { network_worker(outbox_rcv, mailbox_clone).await });
 
     let persister = distributed_kv::raft::state_persister::FilePersistentStorage::new(args.id.clone());
-    let storage_engine = distributed_kv::storage::lsm_tree::LSMTree::new();
+    let storage_engine = distributed_kv::storage::lsm_tree::LSMTree::with_node_id(&args.id);
     let node = LsmTreeNode::new(args.nodes, outbox_snd, args.id, persister, storage_engine).await?;
     _ = tokio::spawn(async move { node.run(mailbox_rcv).await });
 

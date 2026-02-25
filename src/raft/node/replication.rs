@@ -135,6 +135,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                 }
             }
 
+            self.persist_state().await?;
             return Ok(());
         }
 
