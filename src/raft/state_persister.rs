@@ -3,12 +3,11 @@ use serde::{Deserialize, Serialize};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct PersistentState {
     pub current_term: u64,
     pub voted_for: Option<String>,
     pub entries: Vec<LogEntry>,
-    #[serde(default)]
     pub commit_index: u64,
 }
 

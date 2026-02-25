@@ -1,9 +1,19 @@
+
+use crate::storage::lsm_tree::Entry;
+
+#[async_trait::async_trait]
 pub trait StorageEngine {
-    fn set(&mut self, key: Vec<u8>, value: Vec<u8>);
+    async fn set(&mut self, key: Vec<u8>, value: Vec<u8>);
 
-    fn delete(&mut self, key: &[u8]) -> bool;
+    async fn delete(&mut self, key: &[u8]) -> bool;
 
-    fn get(&self, key: &[u8]) -> Option<&[u8]>;
+    /// Returns `None` if the key has never been set, `Some(Entry::Value(_))` if
+    /// it exists, or `Some(Entry::Tombstone)` if it was deleted.
+    async fn get(&self, key: &[u8]) -> Option<Entry>;
+
+    async fn recover(&mut self);
+
+    fn last_applied_index(&self) -> u64;
 }
 
 pub struct StateMachine<SM: StorageEngine> {
@@ -15,7 +25,16 @@ impl <SM: StorageEngine> StateMachine<SM> {
         StateMachine { engine }
     }
 
-    pub fn apply(&mut self, command: String) -> anyhow::Result<()> {
+    pub fn last_applied_index(&self) -> u64 {
+        // For simplicity, we won't track the last applied index in this example.
+        self.engine.last_applied_index()
+    }
+
+    pub async fn recover(&mut self) {
+        self.engine.recover().await;
+    }
+
+    pub async fn apply(&mut self, command: String) -> anyhow::Result<()> {
         let parts: Vec<&str> = command.split_whitespace().collect();
         if parts.is_empty() {
             eprintln!("Received empty command, ignoring");
@@ -25,11 +44,11 @@ impl <SM: StorageEngine> StateMachine<SM> {
         let cmd = parts[0].to_lowercase();
         match cmd.as_str() {
             "set" if parts.len() == 3 => {
-                self.engine.set(parts[1].as_bytes().to_vec(), parts[2].as_bytes().to_vec());
+                self.engine.set(parts[1].as_bytes().to_vec(), parts[2].as_bytes().to_vec()).await;
                 return Ok(());
             }
             "delete" if parts.len() == 2 => {
-                self.engine.delete(parts[1].as_bytes());
+                self.engine.delete(parts[1].as_bytes()).await;
                 return Ok(());
             }
             _ => {
@@ -39,8 +58,11 @@ impl <SM: StorageEngine> StateMachine<SM> {
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.engine.get(key.as_bytes()).and_then(|v| std::str::from_utf8(v).ok())
+    pub async fn get(&self, key: &str) -> Option<String> {
+        match self.engine.get(key.as_bytes()).await {
+            Some(Entry::Value(v)) => String::from_utf8(v).ok(),
+            _ => None,
+        }
     }
 }
 
@@ -54,17 +76,25 @@ mod tests {
         data: HashMap<Vec<u8>, Vec<u8>>,
     }
 
+    #[async_trait::async_trait]
     impl StorageEngine for MockEngine {
-        fn set(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) {
             self.data.insert(key, value);
         }
 
-        fn delete(&mut self, key: &[u8]) -> bool {
+        async fn delete(&mut self, key: &[u8]) -> bool {
             self.data.remove(key).is_some()
         }
 
-        fn get(&self, key: &[u8]) -> Option<&[u8]> {
-            self.data.get(key).map(|v| v.as_slice())
+        async fn get(&self, key: &[u8]) -> Option<Entry> {
+            self.data.get(key).map(|v| Entry::Value(v.clone()))
+        }
+
+        async fn recover(&mut self) {
+        }
+
+        fn last_applied_index(&self) -> u64 {
+            0
         }
     }
 
@@ -72,87 +102,87 @@ mod tests {
         StateMachine::new(MockEngine::default())
     }
 
-    #[test]
-    fn test_apply_set_stores_value() {
+    #[tokio::test]
+    async fn test_apply_set_stores_value() {
         let mut sm = make_sm();
-        sm.apply("set key1 val1".to_string()).unwrap();
-        assert_eq!(sm.get("key1"), Some("val1"));
+        sm.apply("set key1 val1".to_string()).await.unwrap();
+        assert_eq!(sm.get("key1").await.as_deref(), Some("val1"));
     }
 
-    #[test]
-    fn test_apply_set_uppercase_stores_value() {
+    #[tokio::test]
+    async fn test_apply_set_uppercase_stores_value() {
         let mut sm = make_sm();
-        sm.apply("SET key1 val1".to_string()).unwrap();
-        assert_eq!(sm.get("key1"), Some("val1"));
+        sm.apply("SET key1 val1".to_string()).await.unwrap();
+        assert_eq!(sm.get("key1").await.as_deref(), Some("val1"));
     }
 
-    #[test]
-    fn test_apply_set_mixed_case_stores_value() {
+    #[tokio::test]
+    async fn test_apply_set_mixed_case_stores_value() {
         let mut sm = make_sm();
-        sm.apply("Set key1 val1".to_string()).unwrap();
-        assert_eq!(sm.get("key1"), Some("val1"));
+        sm.apply("Set key1 val1".to_string()).await.unwrap();
+        assert_eq!(sm.get("key1").await.as_deref(), Some("val1"));
     }
 
-    #[test]
-    fn test_apply_delete_uppercase_removes_key() {
+    #[tokio::test]
+    async fn test_apply_delete_uppercase_removes_key() {
         let mut sm = make_sm();
-        sm.apply("set key1 val1".to_string()).unwrap();
-        sm.apply("DELETE key1".to_string()).unwrap();
-        assert_eq!(sm.get("key1"), None);
+        sm.apply("set key1 val1".to_string()).await.unwrap();
+        sm.apply("DELETE key1".to_string()).await.unwrap();
+        assert_eq!(sm.get("key1").await, None);
     }
 
-    #[test]
-    fn test_apply_delete_mixed_case_removes_key() {
+    #[tokio::test]
+    async fn test_apply_delete_mixed_case_removes_key() {
         let mut sm = make_sm();
-        sm.apply("set key1 val1".to_string()).unwrap();
-        sm.apply("Delete key1".to_string()).unwrap();
-        assert_eq!(sm.get("key1"), None);
+        sm.apply("set key1 val1".to_string()).await.unwrap();
+        sm.apply("Delete key1".to_string()).await.unwrap();
+        assert_eq!(sm.get("key1").await, None);
     }
 
-    #[test]
-    fn test_apply_set_overwrites_existing_key() {
+    #[tokio::test]
+    async fn test_apply_set_overwrites_existing_key() {
         let mut sm = make_sm();
-        sm.apply("set key1 val1".to_string()).unwrap();
-        sm.apply("set key1 val2".to_string()).unwrap();
-        assert_eq!(sm.get("key1"), Some("val2"));
+        sm.apply("set key1 val1".to_string()).await.unwrap();
+        sm.apply("set key1 val2".to_string()).await.unwrap();
+        assert_eq!(sm.get("key1").await.as_deref(), Some("val2"));
     }
 
-    #[test]
-    fn test_apply_delete_removes_key() {
+    #[tokio::test]
+    async fn test_apply_delete_removes_key() {
         let mut sm = make_sm();
-        sm.apply("set key1 val1".to_string()).unwrap();
-        sm.apply("delete key1".to_string()).unwrap();
-        assert_eq!(sm.get("key1"), None);
+        sm.apply("set key1 val1".to_string()).await.unwrap();
+        sm.apply("delete key1".to_string()).await.unwrap();
+        assert_eq!(sm.get("key1").await, None);
     }
 
-    #[test]
-    fn test_apply_delete_nonexistent_key_does_not_error() {
+    #[tokio::test]
+    async fn test_apply_delete_nonexistent_key_does_not_error() {
         let mut sm = make_sm();
-        assert!(sm.apply("delete missing".to_string()).is_ok());
+        assert!(sm.apply("delete missing".to_string()).await.is_ok());
     }
 
-    #[test]
-    fn test_apply_empty_command_is_ok() {
+    #[tokio::test]
+    async fn test_apply_empty_command_is_ok() {
         let mut sm = make_sm();
-        assert!(sm.apply("".to_string()).is_ok());
+        assert!(sm.apply("".to_string()).await.is_ok());
     }
 
-    #[test]
-    fn test_apply_unknown_command_returns_error() {
+    #[tokio::test]
+    async fn test_apply_unknown_command_returns_error() {
         let mut sm = make_sm();
-        assert!(sm.apply("get key1".to_string()).is_err());
+        assert!(sm.apply("get key1".to_string()).await.is_err());
     }
 
-    #[test]
-    fn test_apply_set_missing_value_returns_error() {
+    #[tokio::test]
+    async fn test_apply_set_missing_value_returns_error() {
         let mut sm = make_sm();
-        assert!(sm.apply("set key1".to_string()).is_err());
+        assert!(sm.apply("set key1".to_string()).await.is_err());
     }
 
-    #[test]
-    fn test_get_missing_key_returns_none() {
+    #[tokio::test]
+    async fn test_get_missing_key_returns_none() {
         let sm = make_sm();
-        assert_eq!(sm.get("missing"), None);
+        assert_eq!(sm.get("missing").await, None);
     }
 }
 
