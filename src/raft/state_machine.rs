@@ -16,6 +16,7 @@ pub trait StorageEngine {
     fn last_applied_index(&self) -> u64;
 }
 
+#[derive(Debug)]
 pub struct StateMachine<SM: StorageEngine> {
     engine: SM,
 }
@@ -32,6 +33,7 @@ impl <SM: StorageEngine> StateMachine<SM> {
 
     pub async fn recover(&mut self) {
         self.engine.recover().await;
+        eprintln!("State machine with last applied index {}", self.last_applied_index());
     }
 
     pub async fn apply(&mut self, command: String) -> anyhow::Result<()> {
