@@ -27,74 +27,26 @@ impl WalEntry {
 
 #[async_trait::async_trait]
 pub trait WalStorage: Send + Sync {
-    async fn append(&self, entry: &WalEntry) -> io::Result<()>;
-    async fn read_all(&self) -> io::Result<Vec<WalEntry>>;
+    async fn append(&mut self, entry: &WalEntry) -> io::Result<()>;
+    async fn read_all(&mut self) -> io::Result<Vec<WalEntry>>;
 }
 
 pub struct Wal {
-    magic_number: u32,
-    path: PathBuf,
+    file_handle: File,
 }
 
 impl Wal {
-    pub fn new(path: PathBuf) -> Self {
-        Self {
-            magic_number: 0xDEADBEEF,
-            path,
-        }
-    }
-
-    async fn append_impl(&self, entry: &WalEntry) -> io::Result<()> {
-        eprintln!("Appending WAL entry: index={}, op={}, key={:?}, value={:?} to {:?}", 
-        entry.index, entry.op, String::from_utf8_lossy(&entry.key), String::from_utf8_lossy(&entry.value), self.path);
-        let encoded = self.encode(entry);
-        eprintln!("Encoded WAL entry as {} bytes: {:?}", encoded.len(), encoded);
-        let mut file = OpenOptions::new()
+    pub async fn new(path: PathBuf) -> Self {
+        let file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.path)
-            .await?;
-        
-        eprintln!("Opened WAL file {:?} for appending", self.path);
-        //self.check_magic_number(&mut file).await?;
-        eprintln!("WAL file {:?} has valid magic number", self.path);
-        file.write_all(&encoded).await?;
-        file.flush().await?;
-        file.sync_all().await?;
-        Ok(())
-    }
-
-    // Returns (is_new_file, is_magic_number_correct)
-    async fn check_magic_number(&self, file: &mut File) -> io::Result<(bool,bool)> {
-        let mut magic_bytes = [0u8; 4];
-        file.read_exact(&mut magic_bytes).await?;
-        if magic_bytes.iter().all(|&b| b == 0) {
-            return Ok((true, true));
-        }
-
-        let read_magic_number = u32::from_be_bytes(magic_bytes);
-        if read_magic_number != self.magic_number {
-            return Err(Error::new(ErrorKind::InvalidData, "Invalid WAL file"));
-        }
-        Ok((false, true))
-    }
-
-    async fn read_all_impl(&self) -> io::Result<Vec<WalEntry>> {
-        let mut file = OpenOptions::new()
             .read(true)
-            .open(&self.path)
-            .await?;
-
-        //self.check_magic_number(&mut file).await?;
-
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).await?;
-
-        let cursor = 0; // Skip the magic number
-        let entries = self.decode_all(&buffer[cursor..])?;
-        Ok(entries)
+            .open(&path)
+            .await.expect("Failed to open WAL file");
+        Self {
+            file_handle: file
+        }
     }
-
     fn decode_all(&self, data: &[u8]) -> io::Result<Vec<WalEntry>> {
         let mut entries = Vec::new();
         let mut cursor = 0;
@@ -164,25 +116,42 @@ impl Wal {
 
 #[async_trait::async_trait]
 impl WalStorage for Wal {
-    async fn append(&self, entry: &WalEntry) -> io::Result<()> {
-        self.append_impl(entry).await
+    async fn append(&mut self, entry: &WalEntry) -> io::Result<()> {
+        eprintln!("Appending WAL entry: index={}, op={}, key={:?}, value={:?}", 
+        entry.index, entry.op, String::from_utf8_lossy(&entry.key), String::from_utf8_lossy(&entry.value));
+        let encoded = self.encode(entry);
+        eprintln!("Encoded WAL entry as {} bytes: {:?}", encoded.len(), encoded);
+        
+        self.file_handle.write_all(&encoded).await?;
+        self.file_handle.flush().await?;
+        self.file_handle.sync_all().await?;
+        Ok(())
     }
 
-    async fn read_all(&self) -> io::Result<Vec<WalEntry>> {
-        self.read_all_impl().await
+    async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
+        let mut buffer = Vec::new();
+        self.file_handle.read_to_end(&mut buffer).await?;
+
+        let cursor = 0; // Skip the magic number
+        let entries = self.decode_all(&buffer[cursor..])?;
+        self.file_handle.rewind().await?;
+        self.file_handle.flush().await?;
+        self.file_handle.sync_all().await?;
+        Ok(entries)
     }
+
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn make_wal() -> Wal {
-        Wal::new(PathBuf::from("/dev/null"))
+    async fn make_wal() -> Wal {
+        Wal::new(PathBuf::from("/dev/null")).await
     }
 
-    #[test]
-    fn test_decode_set_entry() {
+    #[tokio::test]
+    async fn test_decode_set_entry() {
         // index = 42, op = OP_SET, key = b"foo", value = b"bar"
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&42u64.to_be_bytes()); // index
@@ -191,7 +160,9 @@ mod tests {
         bytes.extend_from_slice(b"foo"); // key
         bytes.extend_from_slice(&(3u32.to_be_bytes())); // value len
         bytes.extend_from_slice(b"bar"); // value
-        let (entry, used) = make_wal().decode(&bytes).unwrap();
+        
+        let wal = make_wal().await;
+        let (entry, used) = wal.decode(&bytes).unwrap();
         assert_eq!(used, bytes.len() as u64);
         assert_eq!(entry.index, 42);
         assert_eq!(entry.op, OP_SET);
@@ -199,8 +170,8 @@ mod tests {
         assert_eq!(entry.value, b"bar");
     }
 
-    #[test]
-    fn test_decode_delete_entry() {
+    #[tokio::test]
+    async fn test_decode_delete_entry() {
         // index = 7, op = OP_DELETE, key = b"baz", value = empty
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&7u64.to_be_bytes()); // index
@@ -209,7 +180,8 @@ mod tests {
         bytes.extend_from_slice(b"baz"); // key
         bytes.extend_from_slice(&(0u32.to_be_bytes())); // value len
         // no value
-        let (entry, used) = make_wal().decode(&bytes).unwrap();
+        let wal = make_wal().await;
+        let (entry, used) = wal.decode(&bytes).unwrap();
         assert_eq!(used, bytes.len() as u64);
         assert_eq!(entry.index, 7);
         assert_eq!(entry.op, OP_DELETE);
@@ -217,15 +189,16 @@ mod tests {
         assert_eq!(entry.value, b"");
     }
 
-    #[test]
-    fn test_decode_too_short() {
+    #[tokio::test]
+    async fn test_decode_too_short() {
         let bytes = vec![0, 1, 2];
-        let err = make_wal().decode(&bytes).unwrap_err();
+        let wal = make_wal().await;
+        let err = wal.decode(&bytes).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     }
 
-    #[test]
-    fn test_decode_corrupt_key_len() {
+    #[tokio::test]
+    async fn test_decode_corrupt_key_len() {
         // index + op + key_len (but not enough bytes for key)
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&1u64.to_be_bytes());
@@ -233,12 +206,13 @@ mod tests {
         bytes.extend_from_slice(&(10u32.to_be_bytes())); // key_len = 10
         // only 2 bytes of key
         bytes.extend_from_slice(&[1, 2]);
-        let err = make_wal().decode(&bytes).unwrap_err();
+        let wal = make_wal().await;
+        let err = wal.decode(&bytes).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     }
 
-    #[test]
-    fn test_decode_corrupt_value_len() {
+    #[tokio::test]
+    async fn test_decode_corrupt_value_len() {
         // index + op + key_len + key + value_len (but not enough bytes for value)
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&1u64.to_be_bytes());
@@ -247,13 +221,14 @@ mod tests {
         bytes.extend_from_slice(b"ab");
         bytes.extend_from_slice(&(5u32.to_be_bytes())); // value_len = 5
         bytes.extend_from_slice(b"xyz"); // only 3 bytes
-        let err = make_wal().decode(&bytes).unwrap_err();
+        let wal = make_wal().await;
+        let err = wal.decode(&bytes).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     }
 
-    #[test]
-    fn test_decode_all_multiple_entries() {
-        let wal = super::Wal::new(PathBuf::from("/dev/null"));
+    #[tokio::test]
+    async fn test_decode_all_multiple_entries() {
+        let wal = make_wal().await;
         // Entry 1: SET index=1, key="a", value="x"
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&1u64.to_be_bytes());
@@ -282,9 +257,9 @@ mod tests {
         assert_eq!(entries[2], WalEntry::set(3, b"c".to_vec(), b"yz".to_vec()));
     }
 
-    #[test]
-    fn test_decode_all_trailing_corrupt_entry() {
-        let wal = super::Wal::new(PathBuf::from("/dev/null"));
+    #[tokio::test]
+    async fn test_decode_all_trailing_corrupt_entry() {
+        let wal = make_wal().await;
         // One valid entry, then incomplete second entry
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&1u64.to_be_bytes());
@@ -299,9 +274,9 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     }
 
-    #[test]
-    fn test_decode_all_with_encode() {
-        let wal = super::Wal::new(PathBuf::from("/dev/null"));
+    #[tokio::test]
+    async fn test_decode_all_with_encode() {
+        let wal = make_wal().await;
         let entries = vec![
             WalEntry::set(1, b"foo".to_vec(), b"bar".to_vec()),
             WalEntry::delete(2, b"baz".to_vec()),
@@ -315,9 +290,9 @@ mod tests {
         assert_eq!(decoded, entries);
     }
 
-    #[test]
-    fn test_decode_with_encode() {
-        let wal = super::Wal::new(PathBuf::from("/dev/null"));
+    #[tokio::test]
+    async fn test_decode_with_encode() {
+        let wal = make_wal().await;
         let entry = WalEntry::set(42, b"abc".to_vec(), b"defg".to_vec());
         let bytes = wal.encode(&entry);
         let (decoded, used) = wal.decode(&bytes).unwrap();

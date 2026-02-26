@@ -17,7 +17,6 @@ pub enum State {
     Follower,
 }
 
-#[derive(Debug)]
 pub struct Node<T, SM: StorageEngine> {
     pub(super) current_term: u64,
     pub(super) state: State,
@@ -291,11 +290,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WalStorage for MockWal {
-        async fn append(&self, _entry: &WalEntry) -> io::Result<()> {
+        async fn append(&mut self, _entry: &WalEntry) -> io::Result<()> {
             Ok(())
         }
 
-        async fn read_all(&self) -> io::Result<Vec<WalEntry>> {
+        async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
             Ok(vec![])
         }
     }
@@ -305,11 +304,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WalStorage for PreloadedMockWal {
-        async fn append(&self, _entry: &WalEntry) -> io::Result<()> {
+        async fn append(&mut self, _entry: &WalEntry) -> io::Result<()> {
             Ok(())
         }
 
-        async fn read_all(&self) -> io::Result<Vec<WalEntry>> {
+        async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
             Ok(self.0.clone())
         }
     }
