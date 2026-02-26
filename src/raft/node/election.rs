@@ -47,6 +47,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             self.current_term = vote_request.term;
             self.voted_for.take();
             self.state = State::Follower;
+            self.persist_state().await?;
         }
 
         let voted_for_candidate = match &self.voted_for {
