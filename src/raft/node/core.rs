@@ -176,6 +176,14 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                         .entries
                         .last()
                         .map_or(self.snapshot_last_term, |e| e.term);
+                    
+                    self.entries.push(LogEntry {
+                        term: self.current_term,
+                        command: command.clone(),
+                    });
+                    self.persist_state()
+                        .await
+                        .expect("Failed to persist state after adding new command");
                     for peer in &self.peers {
                         let append_entries = OutMsg::AppendEntries {
                             term: self.current_term,
@@ -193,13 +201,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                         self.network_inbox.send(append_entries).await?;
                     }
 
-                    self.entries.push(LogEntry {
-                        term: self.current_term,
-                        command,
-                    });
-                    self.persist_state()
-                        .await
-                        .expect("Failed to persist state after adding new command");
                     let log_index = self.last_log_index();
                     if let Some(reply_channel) = reply_channel {
                         self.pending_clients.insert(log_index, reply_channel);
