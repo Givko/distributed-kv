@@ -59,15 +59,18 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
     }
 
     async fn recover(&mut self) {
-        if let Ok(entries) = self.wal.read_all().await {
-            for entry in entries {
-                self.next_index = entry.index + 1;
-                match entry.op {
-                    OP_SET => self.memtable.insert(entry.key, Entry::Value(entry.value)),
-                    OP_DELETE => self.memtable.insert(entry.key, Entry::Tombstone),
-                    _ => None,
-                };
+        match self.wal.read_all().await {
+            Ok(entries) => {
+                for entry in entries {
+                    self.next_index = entry.index + 1;
+                    match entry.op {
+                        OP_SET => self.memtable.insert(entry.key, Entry::Value(entry.value)),
+                        OP_DELETE => self.memtable.insert(entry.key, Entry::Tombstone),
+                        _ => None,
+                    };
+                }
             }
+            Err(e) => eprintln!("Failed to read WAL during recovery: {e}"),
         }
     }
 

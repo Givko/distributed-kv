@@ -17,6 +17,7 @@ pub enum State {
     Follower,
 }
 
+#[derive(Debug)]
 pub struct Node<T, SM: StorageEngine> {
     pub(super) current_term: u64,
     pub(super) state: State,
@@ -88,6 +89,8 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         // Raft entries the state machine has durably applied (WAL entry count
         // equals the 1-based Raft log index of the last applied command).
         node.last_applied = node.state_machine.last_applied_index();
+        eprintln!("Node {} initialized with term {}, voted_for {:?}, commit_index {}, last_applied {}",
+            node.id, node.current_term, node.voted_for, node.commit_index, node.last_applied);
         Ok(node)
     }
 
