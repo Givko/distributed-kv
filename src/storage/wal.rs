@@ -1,6 +1,5 @@
 use std::io::{self, Error, ErrorKind};
 use std::path::PathBuf;
-use std::u64;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
@@ -56,14 +55,9 @@ impl Wal {
             .expect("Failed to open WAL file");
         Self { file_handle: file }
     }
-    fn decode_all(&self, data: &[u8]) -> io::Result<Vec<WalEntry>> {
+    fn decode_all(data: &[u8]) -> io::Result<Vec<WalEntry>> {
         let mut entries = Vec::new();
         let mut cursor = 0;
-        eprintln!(
-            "Decoding WAL entries from {} bytes of data data: {:?}",
-            data.len(),
-            data
-        );
         while cursor + 4 <= data.len() {
             // Read the record length prefix
             let len = u32::from_be_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
@@ -74,7 +68,7 @@ impl Wal {
                     "Corrupted WAL entry: length prefix too large",
                 ));
             }
-            let (entry, bytes_read) = self.decode(&data[cursor..cursor + len])?;
+            let (entry, bytes_read) = Wal::decode(&data[cursor..cursor + len])?;
             if bytes_read as usize != len {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
@@ -93,7 +87,7 @@ impl Wal {
         Ok(entries)
     }
 
-    fn decode(&self, data: &[u8]) -> io::Result<(WalEntry, u64)> {
+    fn decode(data: &[u8]) -> io::Result<(WalEntry, u64)> {
         //binary format is [index (8 bytes)][op (1 byte)][key length (4 bytes)][key][value length (4 bytes)][value]
         let mut cursor = 0;
         if cursor + 8 > data.len() {
@@ -154,7 +148,7 @@ impl Wal {
         ))
     }
 
-    fn encode(&self, entry: &WalEntry) -> Vec<u8> {
+    fn encode(entry: &WalEntry) -> Vec<u8> {
         let mut body = Vec::new();
         let key_len = entry.key.len() as u32;
         let value_len = entry.value.len() as u32;
@@ -177,12 +171,7 @@ impl Wal {
 #[async_trait::async_trait]
 impl WalStorage for Wal {
     async fn append(&mut self, entry: &WalEntry) -> io::Result<()> {
-        let encoded = self.encode(entry);
-        eprintln!(
-            "Encoded WAL entry as {} bytes: {:?}",
-            encoded.len(),
-            encoded
-        );
+        let encoded = Wal::encode(entry);
 
         self.file_handle.write_all(&encoded).await?;
         self.file_handle.flush().await?;
@@ -192,13 +181,12 @@ impl WalStorage for Wal {
 
     async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
         let mut buffer = Vec::new();
+        self.file_handle.rewind().await?;
         self.file_handle.read_to_end(&mut buffer).await?;
 
         let cursor = 0; // Skip the magic number
-        let entries = self.decode_all(&buffer[cursor..])?;
+        let entries = Wal::decode_all(&buffer[cursor..])?;
         self.file_handle.rewind().await?;
-        self.file_handle.flush().await?;
-        self.file_handle.sync_all().await?;
         Ok(entries)
     }
 }
@@ -206,10 +194,6 @@ impl WalStorage for Wal {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    async fn make_wal() -> Wal {
-        Wal::new(PathBuf::from("/dev/null")).await
-    }
 
     #[tokio::test]
     async fn test_decode_set_entry() {
@@ -224,8 +208,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
         bytes.extend_from_slice(&body);
-        let wal = make_wal().await;
-        let entries = wal.decode_all(&bytes).unwrap();
+        let entries = Wal::decode_all(&bytes).unwrap();
         assert_eq!(entries.len(), 1);
         let entry = &entries[0];
         assert_eq!(entry.index, 42);
@@ -247,8 +230,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
         bytes.extend_from_slice(&body);
-        let wal = make_wal().await;
-        let entries = wal.decode_all(&bytes).unwrap();
+        let entries = Wal::decode_all(&bytes).unwrap();
         assert_eq!(entries.len(), 1);
         let entry = &entries[0];
         assert_eq!(entry.index, 7);
@@ -260,8 +242,7 @@ mod tests {
     #[tokio::test]
     async fn test_decode_too_short() {
         let bytes = vec![0, 1, 2];
-        let wal = make_wal().await;
-        let err = wal.decode_all(&bytes).unwrap_err();
+        let err = Wal::decode_all(&bytes).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     }
 
@@ -277,8 +258,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
         bytes.extend_from_slice(&body);
-        let wal = make_wal().await;
-        let err = wal.decode_all(&bytes).unwrap_err();
+        let err = Wal::decode_all(&bytes).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     }
 
@@ -295,14 +275,12 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
         bytes.extend_from_slice(&body);
-        let wal = make_wal().await;
-        let err = wal.decode_all(&bytes).unwrap_err();
+        let err = Wal::decode_all(&bytes).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     }
 
     #[tokio::test]
     async fn test_decode_all_multiple_entries() {
-        let wal = make_wal().await;
         let mut bytes = Vec::new();
         // Entry 1: SET index=1, key="a", value="x"
         let mut body1 = Vec::new();
@@ -333,7 +311,7 @@ mod tests {
         body3.extend_from_slice(b"yz");
         bytes.extend_from_slice(&(body3.len() as u32).to_be_bytes());
         bytes.extend_from_slice(&body3);
-        let entries = wal.decode_all(&bytes).unwrap();
+        let entries = Wal::decode_all(&bytes).unwrap();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0], WalEntry::set(1, b"a".to_vec(), b"x".to_vec()));
         assert_eq!(entries[1], WalEntry::delete(2, b"b".to_vec()));
@@ -342,7 +320,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_decode_all_trailing_corrupt_entry() {
-        let wal = make_wal().await;
         // One valid entry, then incomplete second entry
         let mut bytes = Vec::new();
         let mut body1 = Vec::new();
@@ -356,13 +333,12 @@ mod tests {
         bytes.extend_from_slice(&body1);
         // Incomplete entry (only 3 bytes, not enough for length prefix)
         bytes.extend_from_slice(&[1, 2, 3]);
-        let err = wal.decode_all(&bytes).unwrap_err();
+        let err = Wal::decode_all(&bytes).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     }
 
     #[tokio::test]
     async fn test_decode_all_with_encode() {
-        let wal = make_wal().await;
         let entries = vec![
             WalEntry::set(1, b"foo".to_vec(), b"bar".to_vec()),
             WalEntry::delete(2, b"baz".to_vec()),
@@ -370,18 +346,17 @@ mod tests {
         ];
         let mut bytes = Vec::new();
         for entry in &entries {
-            bytes.extend_from_slice(&wal.encode(entry));
+            bytes.extend_from_slice(&Wal::encode(entry));
         }
-        let decoded = wal.decode_all(&bytes).unwrap();
+        let decoded = Wal::decode_all(&bytes).unwrap();
         assert_eq!(decoded, entries);
     }
 
     #[tokio::test]
     async fn test_decode_with_encode() {
-        let wal = make_wal().await;
         let entry = WalEntry::set(42, b"abc".to_vec(), b"defg".to_vec());
-        let bytes = wal.encode(&entry);
-        let decoded = wal.decode_all(&bytes).unwrap();
+        let bytes = Wal::encode(&entry);
+        let decoded = Wal::decode_all(&bytes).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0], entry);
     }
