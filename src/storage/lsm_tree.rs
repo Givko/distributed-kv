@@ -9,6 +9,7 @@ pub enum Entry {
     Tombstone,
 }
 
+
 pub struct LSMTree<W: WalStorage = Wal> {
     memtable: BTreeMap<Vec<u8>, Entry>,
     wal: W,
@@ -16,15 +17,15 @@ pub struct LSMTree<W: WalStorage = Wal> {
 }
 
 impl LSMTree<Wal> {
-    pub fn new() -> Self {
-        Self::with_wal(Wal::new(PathBuf::from("wal.log")))
+    pub async fn new() -> Self {
+        Self::with_wal(Wal::new(PathBuf::from("wal.log")).await)
     }
 
     /// Creates an LSMTree whose WAL file is named `<sanitized_id>-wal.log`,
     /// where the node ID (e.g. `127.0.0.1:5051`) has `:` and `.` replaced by `_`.
-    pub fn with_node_id(id: &str) -> Self {
+    pub async fn with_node_id(id: &str) -> Self {
         let sanitized = id.replace(['.', ':'], "_");
-        Self::with_wal(Wal::new(PathBuf::from(format!("{sanitized}-wal.log"))))
+        Self::with_wal(Wal::new(PathBuf::from(format!("{sanitized}-wal.log"))).await)
     }
 }
 
@@ -103,12 +104,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WalStorage for RecordingWal {
-        async fn append(&self, entry: &WalEntry) -> io::Result<()> {
+        async fn append(&mut self, entry: &WalEntry) -> io::Result<()> {
             self.entries.lock().unwrap().push(entry.clone());
             Ok(())
         }
 
-        async fn read_all(&self) -> io::Result<Vec<WalEntry>> {
+        async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
             Ok(self.entries.lock().unwrap().clone())
         }
     }

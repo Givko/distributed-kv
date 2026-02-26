@@ -16,7 +16,6 @@ pub trait StorageEngine {
     fn last_applied_index(&self) -> u64;
 }
 
-#[derive(Debug)]
 pub struct StateMachine<SM: StorageEngine> {
     engine: SM,
 }
