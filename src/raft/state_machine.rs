@@ -46,15 +46,15 @@ impl <SM: StorageEngine> StateMachine<SM> {
         match cmd.as_str() {
             "set" if parts.len() == 3 => {
                 self.engine.set(parts[1].as_bytes().to_vec(), parts[2].as_bytes().to_vec()).await;
-                return Ok(());
+                Ok(())
             }
             "delete" if parts.len() == 2 => {
                 self.engine.delete(parts[1].as_bytes()).await;
-                return Ok(());
+                Ok(())
             }
             _ => {
                 //Return error for unknown command instead of silently ignoring it
-                return Err(anyhow::anyhow!("Unknown command: {}", command));
+                Err(anyhow::anyhow!("Unknown command: {}", command))
             }
         }
     }
