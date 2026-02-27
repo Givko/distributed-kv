@@ -194,8 +194,8 @@ The test suite uses mock persisters (TestPersister, LoadedStatePersister, Record
 | Persistent state + crash recovery | ✅ Complete |
 | Snapshot boundary tracking | ✅ Complete |
 | InstallSnapshot RPC | Planned |
-| LSM MemTable + WAL | 🔄 In progress |
-| SSTable flush + read path | Planned |
+| LSM MemTable + WAL | ✅ Complete |
+| SSTable flush + read path | 🔄 In Progress |
 | Bloom filters | Planned |
 | Size-tiered compaction | Planned |
 | Raft ↔ LSM integration | Planned |
