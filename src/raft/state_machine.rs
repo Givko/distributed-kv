@@ -1,5 +1,4 @@
-
-use crate::storage::lsm_tree::Entry;
+use crate::storage::lsm_tree::MemTableEntry;
 
 #[async_trait::async_trait]
 pub trait StorageEngine {
@@ -9,7 +8,7 @@ pub trait StorageEngine {
 
     /// Returns `None` if the key has never been set, `Some(Entry::Value(_))` if
     /// it exists, or `Some(Entry::Tombstone)` if it was deleted.
-    async fn get(&self, key: &[u8]) -> Option<Entry>;
+    async fn get(&self, key: &[u8]) -> Option<MemTableEntry>;
 
     async fn recover(&mut self);
 
@@ -20,7 +19,7 @@ pub struct StateMachine<SM: StorageEngine> {
     engine: SM,
 }
 
-impl <SM: StorageEngine> StateMachine<SM> {
+impl<SM: StorageEngine> StateMachine<SM> {
     pub fn new(engine: SM) -> Self {
         StateMachine { engine }
     }
@@ -32,20 +31,25 @@ impl <SM: StorageEngine> StateMachine<SM> {
 
     pub async fn recover(&mut self) {
         self.engine.recover().await;
-        eprintln!("State machine with last applied index {}", self.last_applied_index());
+        eprintln!(
+            "State machine with last applied index {}",
+            self.last_applied_index()
+        );
     }
 
     pub async fn apply(&mut self, command: String) -> anyhow::Result<()> {
         let parts: Vec<&str> = command.split_whitespace().collect();
         if parts.is_empty() {
             eprintln!("Received empty command, ignoring");
-            return Ok(()); 
+            return Ok(());
         }
 
         let cmd = parts[0].to_lowercase();
         match cmd.as_str() {
             "set" if parts.len() == 3 => {
-                self.engine.set(parts[1].as_bytes().to_vec(), parts[2].as_bytes().to_vec()).await;
+                self.engine
+                    .set(parts[1].as_bytes().to_vec(), parts[2].as_bytes().to_vec())
+                    .await;
                 Ok(())
             }
             "delete" if parts.len() == 2 => {
@@ -61,7 +65,7 @@ impl <SM: StorageEngine> StateMachine<SM> {
 
     pub async fn get(&self, key: &str) -> Option<String> {
         match self.engine.get(key.as_bytes()).await {
-            Some(Entry::Value(v)) => String::from_utf8(v).ok(),
+            Some(MemTableEntry::Value(v)) => String::from_utf8(v).ok(),
             _ => None,
         }
     }
@@ -87,12 +91,11 @@ mod tests {
             self.data.remove(key).is_some()
         }
 
-        async fn get(&self, key: &[u8]) -> Option<Entry> {
-            self.data.get(key).map(|v| Entry::Value(v.clone()))
+        async fn get(&self, key: &[u8]) -> Option<MemTableEntry> {
+            self.data.get(key).map(|v| MemTableEntry::Value(v.clone()))
         }
 
-        async fn recover(&mut self) {
-        }
+        async fn recover(&mut self) {}
 
         fn last_applied_index(&self) -> u64 {
             0
@@ -186,7 +189,3 @@ mod tests {
         assert_eq!(sm.get("missing").await, None);
     }
 }
-
-
-
-

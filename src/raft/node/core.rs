@@ -290,8 +290,9 @@ mod tests {
         AppendEntriesData, AppendEntriesReplyData, RequestVoteData, RequestVoteReplyData,
     };
     use crate::raft::state_persister::PersistentState;
+    use crate::storage::entry::Entry as WalEntry;
     use crate::storage::lsm_tree::LSMTree as RealLSMTree;
-    use crate::storage::wal::{WalEntry, WalStorage};
+    use crate::storage::wal::WalStorage;
     use std::io;
     use std::sync::{Arc, Mutex};
 
