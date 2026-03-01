@@ -32,7 +32,7 @@ I built this to learn Raft and LSMs end-to-end by implementing the tricky parts 
 
 ## Architecture
 
-Current state machine: in-memory `HashMap`. Planned: LSM storage engine with WAL, SSTables, bloom filters, and compaction.
+Current state machine: `BTreeMap`-backed LSM tree with a Write-Ahead Log. Planned: SSTable flush, bloom filters, and size-tiered compaction.
 
 ### Raft Consensus Layer
 
@@ -117,16 +117,19 @@ I'm intentionally keeping this to one Raft group so I can go deep on correctness
 ```
 src/
 ├── main.rs                   # CLI args, gRPC server setup, actor wiring
-├── lib.rs                    # Crate root — concrete type aliases (MemKvNode, ...)
+├── lib.rs                    # Crate root — concrete type aliases (LsmTreeNode)
 ├── storage/
-│   ├── mod.rs                # Module declarations + re-exports (StorageEngine)
-│   ├── storage_engine.rs     # StorageEngine trait (apply, get)
-│   └── memkv.rs              # In-memory HashMap implementation of StorageEngine
+│   ├── mod.rs                # Module declarations + re-exports (MemTableEntry)
+│   ├── entry.rs              # WAL/SSTable entry type (op, key, value, index)
+│   ├── encoder.rs            # Binary codec: encode/decode WAL records
+│   ├── wal.rs                # WalStorage trait + file-backed Wal implementation
+│   └── lsm_tree.rs           # LSMTree: MemTable (BTreeMap) + WAL; StorageEngine impl
 └── raft/
     ├── mod.rs                # Module declarations + generated proto inclusion
     ├── raft_types.rs         # Message types, log entries, RPC data structures
     ├── network_sender.rs     # Outbound RPC worker (spawns per-peer tasks)
     ├── network_types.rs      # Outbound message enum (RequestVote, AppendEntries)
+    ├── state_machine.rs      # StorageEngine trait + StateMachine wrapper (apply, get)
     ├── state_persister.rs    # Persister trait + file-based JSON implementation
     ├── proto/
     │   └── raft.proto        # gRPC service definition
