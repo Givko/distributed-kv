@@ -108,7 +108,7 @@ impl Raft for RaftService {
     ) -> Result<Response<AppendEntriesReply>, Status> {
         let message = request.into_inner();
         let (snd, rcv) = tokio::sync::oneshot::channel::<AppendEntriesReplyData>();
-        let append_entries_daata = AppendEntriesData {
+        let append_entries_data = AppendEntriesData {
             term: message.term,
             prev_log_index: message.prev_log_index,
             prev_log_term: message.prev_log_term,
@@ -124,7 +124,7 @@ impl Raft for RaftService {
                 .collect(),
         };
         let append_message = RaftMsg::AppendEntries {
-            append_request: append_entries_daata,
+            append_request: append_entries_data,
             reply_channel: Some(snd),
         };
         self.mailbox

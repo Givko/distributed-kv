@@ -61,9 +61,9 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             self.voted_for = None;
         }
 
+        self.leader = append_request.leader_id.clone();
         if self.state != State::Follower {
             eprintln!("Received append entries, stepping down to follower");
-            self.leader = append_request.leader_id.clone();
             self.state = State::Follower;
         }
 

@@ -44,7 +44,7 @@ impl WalStorage for Wal {
         self.file_handle.rewind().await?;
         self.file_handle.read_to_end(&mut buffer).await?;
 
-        let cursor = 0; // Skip the magic number
+        let cursor = 0;
         let entries = Encoder::decode_all(&buffer[cursor..])?;
         self.file_handle.rewind().await?;
         Ok(entries)

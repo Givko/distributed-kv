@@ -40,10 +40,10 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                         return;
                     };
 
-                    let vote_reply = peer_client
-                        .request_vote(request)
-                        .await
-                        .expect("Failed to send request vote");
+                    let Ok(vote_reply) = peer_client.request_vote(request).await else {
+                        eprintln!("Failed to send request vote to peer {}", peer);
+                        return;
+                    };
                     let vote_reply = vote_reply.into_inner();
                     let vote_reply_inner = RequestVoteReplyData {
                         term: vote_reply.term,
