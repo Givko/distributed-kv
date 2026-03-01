@@ -1,3 +1,6 @@
+pub(super) mod entry;
 pub mod lsm_tree;
-pub mod wal;
-pub use lsm_tree::Entry;
+pub(super) mod wal;
+pub use lsm_tree::MemTableEntry;
+
+pub(super) mod encoder;

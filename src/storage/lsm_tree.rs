@@ -1,17 +1,17 @@
+use crate::raft::state_machine::StorageEngine;
+use crate::storage::entry::{Entry, OP_DELETE, OP_SET};
+use crate::storage::wal::{Wal, WalStorage};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use crate::raft::state_machine::StorageEngine;
-use crate::storage::wal::{Wal, WalEntry, WalStorage, OP_DELETE, OP_SET};
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum Entry {
+pub enum MemTableEntry {
     Value(Vec<u8>),
     Tombstone,
 }
 
-
 pub struct LSMTree<W: WalStorage = Wal> {
-    memtable: BTreeMap<Vec<u8>, Entry>,
+    memtable: BTreeMap<Vec<u8>, MemTableEntry>,
     wal: W,
     next_index: u64,
 }
@@ -41,22 +41,30 @@ impl<W: WalStorage> LSMTree<W> {
 
 #[async_trait::async_trait]
 impl<W: WalStorage> StorageEngine for LSMTree<W> {
-    async fn get(&self, key: &[u8]) -> Option<Entry> {
+    async fn get(&self, key: &[u8]) -> Option<MemTableEntry> {
         self.memtable.get(key).cloned()
     }
 
     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) {
-        let set_entry = WalEntry::set(self.next_index, key.clone(), value.clone());
-        self.wal.append(&set_entry).await.expect("Failed to write to WAL");
+        let set_entry = Entry::set(self.next_index, key.clone(), value.clone());
+        self.wal
+            .append(&set_entry)
+            .await
+            .expect("Failed to write to WAL");
         self.next_index += 1;
-        self.memtable.insert(key, Entry::Value(value));
+        self.memtable.insert(key, MemTableEntry::Value(value));
     }
 
     async fn delete(&mut self, key: &[u8]) -> bool {
-        let delete_entry = WalEntry::delete(self.next_index, key.to_vec());
-        self.wal.append(&delete_entry).await.expect("Failed to write to WAL");
+        let delete_entry = Entry::delete(self.next_index, key.to_vec());
+        self.wal
+            .append(&delete_entry)
+            .await
+            .expect("Failed to write to WAL");
         self.next_index += 1;
-        self.memtable.insert(key.to_vec(), Entry::Tombstone).is_some()
+        self.memtable
+            .insert(key.to_vec(), MemTableEntry::Tombstone)
+            .is_some()
     }
 
     async fn recover(&mut self) {
@@ -65,8 +73,10 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
                 for entry in entries {
                     self.next_index = entry.index + 1;
                     match entry.op {
-                        OP_SET => self.memtable.insert(entry.key, Entry::Value(entry.value)),
-                        OP_DELETE => self.memtable.insert(entry.key, Entry::Tombstone),
+                        OP_SET => self
+                            .memtable
+                            .insert(entry.key, MemTableEntry::Value(entry.value)),
+                        OP_DELETE => self.memtable.insert(entry.key, MemTableEntry::Tombstone),
                         _ => None,
                     };
                 }
@@ -86,7 +96,8 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::wal::{WalEntry, WalStorage, OP_DELETE, OP_SET};
+    use crate::storage::entry::{Entry as WalEntry, OP_DELETE, OP_SET};
+    use crate::storage::wal::WalStorage;
     use std::io;
     use std::sync::Mutex;
 
@@ -130,7 +141,10 @@ mod tests {
     async fn test_get_existing_key_returns_value() {
         let mut tree = make_tree();
         tree.set(b"k".to_vec(), b"v".to_vec()).await;
-        assert_eq!(tree.get(b"k").await, Some(Entry::Value(b"v".to_vec())));
+        assert_eq!(
+            tree.get(b"k").await,
+            Some(MemTableEntry::Value(b"v".to_vec()))
+        );
     }
 
     // ── set ──────────────────────────────────────────────────────────────────
@@ -140,7 +154,10 @@ mod tests {
         let mut tree = make_tree();
         tree.set(b"k".to_vec(), b"v1".to_vec()).await;
         tree.set(b"k".to_vec(), b"v2".to_vec()).await;
-        assert_eq!(tree.get(b"k").await, Some(Entry::Value(b"v2".to_vec())));
+        assert_eq!(
+            tree.get(b"k").await,
+            Some(MemTableEntry::Value(b"v2".to_vec()))
+        );
     }
 
     #[tokio::test]
@@ -149,7 +166,7 @@ mod tests {
         tree.set(b"key".to_vec(), b"val".to_vec()).await;
         let entries = tree.wal.recorded();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].op, OP_SET);           // op = SET
+        assert_eq!(entries[0].op, OP_SET); // op = SET
         assert_eq!(entries[0].key, b"key");
         assert_eq!(entries[0].value, b"val");
     }
@@ -175,7 +192,7 @@ mod tests {
         tree.set(b"k".to_vec(), b"v".to_vec()).await;
         tree.delete(b"k").await;
         // Deleted key has a tombstone — distinguishable from a never-set key.
-        assert_eq!(tree.get(b"k").await, Some(Entry::Tombstone));
+        assert_eq!(tree.get(b"k").await, Some(MemTableEntry::Tombstone));
     }
 
     #[tokio::test]
@@ -185,7 +202,7 @@ mod tests {
         tree.delete(b"k").await;
         let entries = tree.wal.recorded();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[1].op, OP_DELETE);           // op = DELETE
+        assert_eq!(entries[1].op, OP_DELETE); // op = DELETE
         assert_eq!(entries[1].key, b"k");
         assert_eq!(entries[1].value, b"");
     }
@@ -202,8 +219,14 @@ mod tests {
         ]);
         let mut tree = LSMTree::with_wal(wal);
         tree.recover().await;
-        assert_eq!(tree.get(b"k1").await, Some(Entry::Value(b"v1".to_vec())));
-        assert_eq!(tree.get(b"k2").await, Some(Entry::Value(b"v2".to_vec())));
+        assert_eq!(
+            tree.get(b"k1").await,
+            Some(MemTableEntry::Value(b"v1".to_vec()))
+        );
+        assert_eq!(
+            tree.get(b"k2").await,
+            Some(MemTableEntry::Value(b"v2".to_vec()))
+        );
     }
 
     #[tokio::test]
@@ -216,7 +239,7 @@ mod tests {
         let mut tree = LSMTree::with_wal(wal);
         tree.recover().await;
         // After recovery the key carries a tombstone, not a value and not absent.
-        assert_eq!(tree.get(b"k").await, Some(Entry::Tombstone));
+        assert_eq!(tree.get(b"k").await, Some(MemTableEntry::Tombstone));
     }
 
     #[tokio::test]
@@ -228,7 +251,10 @@ mod tests {
         ]);
         let mut tree = LSMTree::with_wal(wal);
         tree.recover().await;
-        assert_eq!(tree.get(b"k").await, Some(Entry::Value(b"v2".to_vec())));
+        assert_eq!(
+            tree.get(b"k").await,
+            Some(MemTableEntry::Value(b"v2".to_vec()))
+        );
     }
 
     #[tokio::test]
@@ -241,7 +267,10 @@ mod tests {
         ]);
         let mut tree = LSMTree::with_wal(wal);
         tree.recover().await;
-        assert_eq!(tree.get(b"k").await, Some(Entry::Value(b"v2".to_vec())));
+        assert_eq!(
+            tree.get(b"k").await,
+            Some(MemTableEntry::Value(b"v2".to_vec()))
+        );
     }
 
     #[tokio::test]
