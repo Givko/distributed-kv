@@ -1,10 +1,10 @@
-use crate::storage::lsm_tree::MemTableEntry;
+use crate::storage::memtable::MemTableEntry;
 
 #[async_trait::async_trait]
 pub trait StorageEngine {
     async fn set(&mut self, raft_index: u64, key: Vec<u8>, value: Vec<u8>);
 
-    async fn delete(&mut self, raft_index: u64, key: &[u8]) -> bool;
+    async fn delete(&mut self, raft_index: u64, key: &[u8]);
 
     /// Returns `None` if the key has never been set, `Some(Entry::Value(_))` if
     /// it exists, or `Some(Entry::Tombstone)` if it was deleted.
@@ -87,8 +87,8 @@ mod tests {
             self.data.insert(key, value);
         }
 
-        async fn delete(&mut self, _raft_index: u64, key: &[u8]) -> bool {
-            self.data.remove(key).is_some()
+        async fn delete(&mut self, _raft_index: u64, key: &[u8]) {
+            self.data.remove(key);
         }
 
         async fn get(&self, key: &[u8]) -> Option<MemTableEntry> {
