@@ -1,4 +1,4 @@
-use crate::storage::entry::{self, Entry};
+use crate::storage::entry::{Entry};
 use std::collections::BTreeMap;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -14,7 +14,7 @@ pub enum MemTableEntry {
 
 pub trait MemTable {
     fn set(&mut self, logical_index: u64, key: Vec<u8>, value: Vec<u8>);
-    fn delete(&mut self, logical_index: u64, key: &[u8]); // returns whether a prior entry existed
+    fn delete(&mut self, logical_index: u64, key: &[u8]); 
     fn get(&self, key: &[u8]) -> Option<&MemTableEntry>;
     fn to_entries(&self) -> Vec<Entry>;  // ordered snapshot for flushing — owns the flush conversion logic
     fn clear(&mut self);
