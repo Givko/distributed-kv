@@ -251,7 +251,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                 .command
                 .clone();
 
-            self.state_machine.apply(command).await?;
+            self.state_machine.apply(i, command).await?;
             self.last_applied = i;
 
             let reply_channel = self.pending_clients.remove(&i);
@@ -495,8 +495,8 @@ mod tests {
         // Pre-populate the WAL with the two committed entries so that WAL recovery
         // restores the state machine instead of relying on apply_commands.
         let wal = PreloadedMockWal(vec![
-            WalEntry::set(0, b"key1".to_vec(), b"val1".to_vec()),
-            WalEntry::set(1, b"key2".to_vec(), b"val2".to_vec()),
+            WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
+            WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
         ]);
         let node = Node::new(
             vec![],
@@ -539,9 +539,9 @@ mod tests {
         };
         // Pre-populate the WAL with all three committed entries.
         let wal = PreloadedMockWal(vec![
-            WalEntry::set(0, b"key1".to_vec(), b"val1".to_vec()),
-            WalEntry::set(1, b"key2".to_vec(), b"val2".to_vec()),
-            WalEntry::set(2, b"key1".to_vec(), b"val3".to_vec()),
+            WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
+            WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
+            WalEntry::set(3, b"key1".to_vec(), b"val3".to_vec()),
         ]);
         let node = Node::new(
             vec![],
@@ -582,8 +582,8 @@ mod tests {
             },
         };
         let wal = PreloadedMockWal(vec![
-            WalEntry::set(0, b"key1".to_vec(), b"val1".to_vec()),
-            WalEntry::set(1, b"key2".to_vec(), b"val2".to_vec()),
+            WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
+            WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
         ]);
         let node = Node::new(
             vec![],
@@ -593,7 +593,7 @@ mod tests {
             RealLSMTree::with_wal(wal),
         )
         .await?;
-        // last_applied must come from the WAL count (2 entries → index 2), not commit_index.
+        // last_applied must come from the WAL (highest raft index = 2).
         assert_eq!(node.last_applied, 2);
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
         assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
@@ -623,8 +623,8 @@ mod tests {
             },
         };
         let wal = PreloadedMockWal(vec![
-            WalEntry::set(0, b"key1".to_vec(), b"val1".to_vec()),
-            WalEntry::set(1, b"key1".to_vec(), b"val2".to_vec()),
+            WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
+            WalEntry::set(2, b"key1".to_vec(), b"val2".to_vec()),
         ]);
         let mut node = Node::new(
             vec![],
@@ -670,7 +670,7 @@ mod tests {
             },
         };
         // … but the WAL only recorded the first one before the crash.
-        let wal = PreloadedMockWal(vec![WalEntry::set(0, b"key1".to_vec(), b"val1".to_vec())]);
+        let wal = PreloadedMockWal(vec![WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec())]);
         let node = Node::new(
             vec![],
             network_inbox,
@@ -780,7 +780,7 @@ mod tests {
         node.commit_index = 3;
         node.last_applied = 1;
         node.state_machine
-            .apply("set key1 val1".to_string())
+            .apply(1, "set key1 val1".to_string())
             .await
             .unwrap();
         node.entries.push(LogEntry {
