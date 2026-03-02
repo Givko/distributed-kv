@@ -1,23 +1,12 @@
 use crate::raft::state_machine::StorageEngine;
 use crate::storage::entry::{Entry, OP_DELETE, OP_SET};
+use crate::storage::memtable::{MemTable, MemTableEntry, BTreeMapMemTable};
 use crate::storage::sstable::{SSTableStorageManager, SSTablesStorage};
 use crate::storage::wal::{Wal, WalStorage};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-#[derive(Clone, PartialEq, Debug)]
-pub enum MemTableEntry {
-    Value {
-        logical_index: u64, // Logical index of the last WAL entry that set this value. Used to resolve conflicts during recovery.
-        value: Vec<u8>,
-    },
-    Tombstone{
-      logical_index: u64, // Logical index of the last WAL entry that deleted this key. Used to resolve conflicts during recovery.
-    },
-}
-
 pub struct LSMTree<W: WalStorage = Wal> {
-    memtable: BTreeMap<Vec<u8>, MemTableEntry>,
+    memtable: Box<dyn MemTable + Sync + Send>, 
     wal: W,
     sstable_storage: Box<dyn SSTablesStorage + Sync + Send>,
     last_raft_index: u64,
@@ -39,7 +28,7 @@ impl LSMTree<Wal> {
 impl<W: WalStorage> LSMTree<W> {
     pub fn with_wal(wal: W) -> Self {
         LSMTree {
-            memtable: BTreeMap::new(),
+            memtable: Box::new(BTreeMapMemTable::new()),
             wal,
             sstable_storage: Box::new(SSTableStorageManager::new()), // Replace with actual initialization
             last_raft_index: 0,
@@ -49,18 +38,7 @@ impl<W: WalStorage> LSMTree<W> {
     fn flush_to_sstable(&mut self) {
         // Implement logic to flush the memtable to an SSTable using self.sstable_storage.flush()
         // After flushing, clear the memtable and reset last_raft_index if necessary.
-        let _cur_entries = self.memtable.iter().map(|(k, v)| {
-            let (index, value) = match v {
-                MemTableEntry::Value { logical_index, value } => (*logical_index, value.clone()),
-                MemTableEntry::Tombstone { logical_index } => (*logical_index, Vec::new()),
-            };
-            Entry {
-                index,
-                op: if matches!(v, MemTableEntry::Tombstone { .. }) { OP_DELETE } else { OP_SET },
-                key: k.clone(),
-                value,
-            }
-        }).collect::<Vec<_>>();
+        let _cur_entries = self.memtable.to_entries();
     
     }
 }
@@ -78,19 +56,17 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
             .await
             .expect("Failed to write to WAL");
         self.last_raft_index = raft_index;
-        self.memtable.insert(key, MemTableEntry::Value { logical_index: raft_index, value });
+        self.memtable.set(raft_index, key, value);
     }
 
-    async fn delete(&mut self, raft_index: u64, key: &[u8]) -> bool {
+    async fn delete(&mut self, raft_index: u64, key: &[u8]) {
         let delete_entry = Entry::delete(raft_index, key.to_vec());
         self.wal
             .append(&delete_entry)
             .await
             .expect("Failed to write to WAL");
         self.last_raft_index = raft_index;
-        self.memtable
-            .insert(key.to_vec(), MemTableEntry::Tombstone { logical_index: raft_index })
-            .is_some()
+        self.memtable.delete(raft_index, key)
     }
 
     async fn recover(&mut self) {
@@ -99,11 +75,9 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
                 for entry in entries {
                     self.last_raft_index = entry.index;
                     match entry.op {
-                        OP_SET => self
-                            .memtable
-                            .insert(entry.key, MemTableEntry::Value { logical_index: entry.index, value: entry.value }),
-                        OP_DELETE => self.memtable.insert(entry.key, MemTableEntry::Tombstone { logical_index: entry.index }),
-                        _ => None,
+                        OP_SET => self.memtable.set(entry.index, entry.key, entry.value),
+                        OP_DELETE => _ = self.memtable.delete(entry.index, &entry.key),
+                        _ => eprintln!("Unknown WAL entry op code: {}", entry.op)
                     };
                 }
             }
@@ -213,13 +187,15 @@ mod tests {
     async fn test_delete_existing_key_returns_true() {
         let mut tree = make_tree();
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
-        assert!(tree.delete(2, b"k").await);
+        tree.delete(2, b"k").await;
+        assert_eq!(tree.get(b"k").await, Some(MemTableEntry::Tombstone { logical_index: 2 }));
     }
 
     #[tokio::test]
     async fn test_delete_missing_key_returns_false() {
         let mut tree = make_tree();
-        assert!(!tree.delete(1, b"missing").await);
+        tree.delete(1, b"missing").await;
+        assert_eq!(tree.get(b"missing").await, Some(MemTableEntry::Tombstone { logical_index: 1 }));
     }
 
     #[tokio::test]
