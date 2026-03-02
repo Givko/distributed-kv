@@ -11,7 +11,9 @@ pub enum MemTableEntry {
         logical_index: u64, // Logical index of the last WAL entry that set this value. Used to resolve conflicts during recovery.
         value: Vec<u8>,
     },
-    Tombstone,
+    Tombstone{
+      logical_index: u64, // Logical index of the last WAL entry that deleted this key. Used to resolve conflicts during recovery.
+    },
 }
 
 pub struct LSMTree<W: WalStorage = Wal> {
@@ -50,11 +52,11 @@ impl<W: WalStorage> LSMTree<W> {
         let _cur_entries = self.memtable.iter().map(|(k, v)| {
             let (index, value) = match v {
                 MemTableEntry::Value { logical_index, value } => (*logical_index, value.clone()),
-                MemTableEntry::Tombstone => (0, Vec::new()), // Represent tombstone as empty value in SSTable
+                MemTableEntry::Tombstone { logical_index } => (*logical_index, Vec::new()),
             };
             Entry {
                 index,
-                op: if matches!(v, MemTableEntry::Tombstone) { OP_DELETE } else { OP_SET },
+                op: if matches!(v, MemTableEntry::Tombstone { .. }) { OP_DELETE } else { OP_SET },
                 key: k.clone(),
                 value,
             }
@@ -87,7 +89,7 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
             .expect("Failed to write to WAL");
         self.last_raft_index = raft_index;
         self.memtable
-            .insert(key.to_vec(), MemTableEntry::Tombstone)
+            .insert(key.to_vec(), MemTableEntry::Tombstone { logical_index: raft_index })
             .is_some()
     }
 
@@ -100,7 +102,7 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
                         OP_SET => self
                             .memtable
                             .insert(entry.key, MemTableEntry::Value { logical_index: entry.index, value: entry.value }),
-                        OP_DELETE => self.memtable.insert(entry.key, MemTableEntry::Tombstone),
+                        OP_DELETE => self.memtable.insert(entry.key, MemTableEntry::Tombstone { logical_index: entry.index }),
                         _ => None,
                     };
                 }
@@ -226,7 +228,43 @@ mod tests {
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
         tree.delete(2, b"k").await;
         // Deleted key has a tombstone — distinguishable from a never-set key.
-        assert_eq!(tree.get(b"k").await, Some(MemTableEntry::Tombstone));
+        assert_eq!(tree.get(b"k").await, Some(MemTableEntry::Tombstone { logical_index: 2 }));
+    }
+
+    #[tokio::test]
+    async fn test_tombstone_carries_raft_index_from_delete() {
+        // The logical_index on a tombstone must equal the raft index passed to delete.
+        let mut tree = make_tree();
+        tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
+        tree.delete(5, b"k").await; // non-contiguous raft index
+        assert_eq!(
+            tree.get(b"k").await,
+            Some(MemTableEntry::Tombstone { logical_index: 5 })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tombstone_logical_index_updated_on_redelete() {
+        // Deleting the same key twice: the second tombstone carries the higher index.
+        let mut tree = make_tree();
+        tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
+        tree.delete(2, b"k").await;
+        tree.delete(3, b"k").await;
+        assert_eq!(
+            tree.get(b"k").await,
+            Some(MemTableEntry::Tombstone { logical_index: 3 })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tombstone_on_never_set_key_carries_raft_index() {
+        // Deleting a key that was never set still stores a tombstone with the correct index.
+        let mut tree = make_tree();
+        tree.delete(7, b"ghost").await;
+        assert_eq!(
+            tree.get(b"ghost").await,
+            Some(MemTableEntry::Tombstone { logical_index: 7 })
+        );
     }
 
     #[tokio::test]
@@ -275,7 +313,23 @@ mod tests {
         let mut tree = LSMTree::with_wal(wal);
         tree.recover().await;
         // After recovery the key carries a tombstone, not a value and not absent.
-        assert_eq!(tree.get(b"k").await, Some(MemTableEntry::Tombstone));
+        assert_eq!(tree.get(b"k").await, Some(MemTableEntry::Tombstone { logical_index: 2 }));
+    }
+
+    #[tokio::test]
+    async fn test_recover_tombstone_logical_index_matches_wal_entry() {
+        // On recovery, the tombstone's logical_index must equal the WAL entry's raft index.
+        let wal = RecordingWal::default();
+        wal.entries.lock().unwrap().extend([
+            WalEntry::set(1, b"k".to_vec(), b"v".to_vec()),
+            WalEntry::delete(4, b"k".to_vec()), // non-contiguous raft index
+        ]);
+        let mut tree = LSMTree::with_wal(wal);
+        tree.recover().await;
+        assert_eq!(
+            tree.get(b"k").await,
+            Some(MemTableEntry::Tombstone { logical_index: 4 })
+        );
     }
 
     #[tokio::test]
