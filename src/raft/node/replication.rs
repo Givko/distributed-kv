@@ -7,11 +7,9 @@ use crate::raft::state_machine::StorageEngine;
 impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     pub(super) async fn send_heartbeat(&self) -> anyhow::Result<()> {
         for peer in &self.peers {
-            let prev_log_index = self.last_log_index();
-            let prev_log_term = self
-                .entries
-                .last()
-                .map_or(self.snapshot_last_term, |e| e.term);
+            let prev_log_index = self.next_index.get(peer).unwrap_or(&1) - 1;
+            let prev_log_term = self.get_log_term(prev_log_index);
+
             let out_msg = OutMsg::AppendEntries {
                 term: self.current_term,
                 leader_id: self.id.clone(),
@@ -198,6 +196,639 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         };
 
         self.network_inbox.send(append_entries).await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raft::raft_types::{AppendEntriesData, AppendEntriesReplyData};
+    use crate::raft::state_persister::PersistentState;
+    use crate::storage::entry::Entry as WalEntry;
+    use crate::storage::lsm_tree::LSMTree as RealLSMTree;
+    use crate::storage::wal::WalStorage;
+    use std::io;
+
+    struct TestPersister;
+
+    struct MockWal;
+
+    #[async_trait::async_trait]
+    impl WalStorage for MockWal {
+        async fn append(&mut self, _entry: &WalEntry) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
+            Ok(vec![])
+        }
+    }
+
+    struct LSMTree;
+
+    impl LSMTree {
+        fn new() -> RealLSMTree<MockWal> {
+            RealLSMTree::with_wal(MockWal)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Persister for TestPersister {
+        async fn save_state(&self, _state: &PersistentState) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn create_snapshot(&self, _: u64, _: u64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn load_state(&self) -> anyhow::Result<PersistentState> {
+            Ok(PersistentState {
+                current_term: 0,
+                voted_for: None,
+                entries: vec![],
+                commit_index: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_uses_snapshot_index_and_term_for_prev_log_match()
+    -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 4;
+        node.snapshot_last_index = 5;
+        node.snapshot_last_term = 3;
+        let reply = node
+            .handle_append_entries(AppendEntriesData {
+                term: 4,
+                prev_log_index: 5,
+                prev_log_term: 3,
+                leader_commit: 10,
+                leader_id: "node2".to_string(),
+                entries: vec![LogEntry {
+                    term: 4,
+                    command: "set key val".to_string(),
+                }],
+            })
+            .await?;
+        assert!(reply.success);
+        assert_eq!(node.entries.len(), 1);
+        assert_eq!(node.last_log_index(), 6);
+        assert_eq!(node.commit_index, 6);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_rejects_when_snapshot_prev_log_term_mismatches()
+    -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 4;
+        node.snapshot_last_index = 5;
+        node.snapshot_last_term = 3;
+        let reply = node
+            .handle_append_entries(AppendEntriesData {
+                term: 4,
+                prev_log_index: 5,
+                prev_log_term: 9,
+                leader_commit: 10,
+                leader_id: "node2".to_string(),
+                entries: vec![LogEntry {
+                    term: 4,
+                    command: "set key val".to_string(),
+                }],
+            })
+            .await?;
+        assert!(!reply.success);
+        assert!(node.entries.is_empty());
+        assert_eq!(node.last_log_index(), 5);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 1;
+        node.state = State::Leader;
+        let reply = node
+            .handle_append_entries(AppendEntriesData {
+                term: 2,
+                prev_log_index: 0,
+                prev_log_term: 0,
+                leader_commit: 0,
+                leader_id: "node2".to_string(),
+                entries: vec![],
+            })
+            .await?;
+        assert!(reply.success);
+        assert_eq!(node.current_term, 2);
+        assert_eq!(node.state, State::Follower);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_stale_term() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 1;
+        node.state = State::Leader;
+        let reply = node
+            .handle_append_entries(AppendEntriesData {
+                term: 2,
+                prev_log_index: 0,
+                prev_log_term: 0,
+                leader_commit: 0,
+                leader_id: "node2".to_string(),
+                entries: vec![],
+            })
+            .await?;
+        assert!(reply.success);
+        assert_eq!(node.current_term, 2);
+        assert_eq!(node.state, State::Follower);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_stale_request() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 2;
+        node.state = State::Leader;
+        let reply = node
+            .handle_append_entries(AppendEntriesData {
+                term: 1,
+                prev_log_index: 0,
+                prev_log_term: 0,
+                leader_commit: 0,
+                leader_id: "node2".to_string(),
+                entries: vec![],
+            })
+            .await?;
+        assert!(!reply.success);
+        assert_eq!(node.current_term, 2);
+        assert_eq!(node.state, State::Leader);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_prev_log_index_high() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 2;
+        node.state = State::Leader;
+        let reply = node
+            .handle_append_entries(AppendEntriesData {
+                term: 3,
+                prev_log_index: 1,
+                prev_log_term: 0,
+                leader_commit: 0,
+                leader_id: "node2".to_string(),
+                entries: vec![],
+            })
+            .await?;
+        assert!(!reply.success);
+        assert_eq!(node.current_term, 3);
+        assert_eq!(node.state, State::Follower);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_prev_log_term_mismatch() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 2;
+        node.state = State::Leader;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        let reply = node
+            .handle_append_entries(AppendEntriesData {
+                term: 3,
+                prev_log_index: 1,
+                prev_log_term: 0,
+                leader_commit: 0,
+                leader_id: "node2".to_string(),
+                entries: vec![],
+            })
+            .await?;
+        assert!(!reply.success);
+        assert_eq!(node.current_term, 3);
+        assert_eq!(node.state, State::Follower);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_successful_append() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 2;
+        node.state = State::Follower;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        let reply = node
+            .handle_append_entries(AppendEntriesData {
+                term: 2,
+                prev_log_index: 1,
+                prev_log_term: 1,
+                leader_commit: 0,
+                leader_id: "node2".to_string(),
+                entries: vec![LogEntry {
+                    term: 2,
+                    command: "cmd2".to_string(),
+                }],
+            })
+            .await?;
+        assert!(reply.success);
+        assert_eq!(node.entries.len(), 2);
+        assert_eq!(node.entries[1].term, 2);
+        assert_eq!(node.entries[1].command, "cmd2");
+        assert_eq!(node.commit_index, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_conflicting_entries() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 2;
+        node.state = State::Follower;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 2,
+            command: "cmd2".to_string(),
+        });
+        let reply = node
+            .handle_append_entries(AppendEntriesData {
+                term: 3,
+                prev_log_index: 1,
+                prev_log_term: 1,
+                leader_commit: 0,
+                leader_id: "node2".to_string(),
+                entries: vec![LogEntry {
+                    term: 3,
+                    command: "cmd3".to_string(),
+                }],
+            })
+            .await?;
+        assert!(reply.success);
+        assert_eq!(node.entries.len(), 2);
+        assert_eq!(node.entries[1].term, 3);
+        assert_eq!(node.entries[1].command, "cmd3");
+        assert_eq!(node.commit_index, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_heartbeat_update_commit_index_with_leader()
+    -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 2;
+        node.state = State::Follower;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 2,
+            command: "cmd2".to_string(),
+        });
+        let reply = node
+            .handle_append_entries(AppendEntriesData {
+                term: 3,
+                prev_log_index: 2,
+                prev_log_term: 2,
+                leader_commit: 2,
+                leader_id: "node2".to_string(),
+                entries: vec![],
+            })
+            .await?;
+        assert!(reply.success);
+        assert_eq!(node.entries.len(), 2);
+        assert_eq!(node.commit_index, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_update_commit_with_entries_length() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 2;
+        node.state = State::Follower;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 2,
+            command: "cmd2".to_string(),
+        });
+        let reply = node
+            .handle_append_entries(AppendEntriesData {
+                term: 3,
+                prev_log_index: 2,
+                prev_log_term: 2,
+                leader_commit: 4,
+                leader_id: "node2".to_string(),
+                entries: vec![],
+            })
+            .await?;
+        assert!(reply.success);
+        assert_eq!(node.entries.len(), 2);
+        assert_eq!(node.commit_index, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_update_commit_with_new_entries_length() -> anyhow::Result<()>
+    {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 2;
+        node.state = State::Follower;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 2,
+            command: "cmd2".to_string(),
+        });
+        let reply = node
+            .handle_append_entries(AppendEntriesData {
+                term: 3,
+                prev_log_index: 2,
+                prev_log_term: 2,
+                leader_commit: 4,
+                leader_id: "node2".to_string(),
+                entries: vec![LogEntry {
+                    term: 3,
+                    command: "cmd3".to_string(),
+                }],
+            })
+            .await?;
+        assert!(reply.success);
+        assert_eq!(node.entries.len(), 3);
+        assert_eq!(node.entries[2].term, 3);
+        assert_eq!(node.entries[2].command, "cmd3");
+        assert_eq!(node.commit_index, 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_reply_step_down() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 1;
+        node.state = State::Leader;
+        node.handle_append_entries_reply(AppendEntriesReplyData {
+            term: 2,
+            success: false,
+            peer: "test".to_owned(),
+            entries_count: 0,
+        })
+        .await?;
+        assert_eq!(node.current_term, 2);
+        assert_eq!(node.state, State::Follower);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_reply_no_step_down() -> anyhow::Result<()> {
+        let (network_inbox, _rx) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec!["test".to_owned()],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 2;
+        node.state = State::Leader;
+        node.next_index.insert("test".to_owned(), 1);
+        node.handle_append_entries_reply(AppendEntriesReplyData {
+            term: 1,
+            success: false,
+            peer: "test".to_owned(),
+            entries_count: 0,
+        })
+        .await?;
+        assert_eq!(node.current_term, 2);
+        assert_eq!(node.state, State::Leader);
+        assert_eq!(*node.next_index.get("test").unwrap(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_reply_unsuccess_decrement_next_index() -> anyhow::Result<()>
+    {
+        let (network_inbox, _rx) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec!["test".to_owned()],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 2;
+        node.next_index.insert("test".to_owned(), 3);
+        node.state = State::Leader;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 2,
+            command: "cmd2".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd3".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 2,
+            command: "cmd4".to_string(),
+        });
+        node.handle_append_entries_reply(AppendEntriesReplyData {
+            term: 2,
+            success: false,
+            peer: "test".to_owned(),
+            entries_count: 0,
+        })
+        .await?;
+        assert_eq!(*node.next_index.get("test").unwrap(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_reply_unsuccess_next_index_stays_1() -> anyhow::Result<()> {
+        let (network_inbox, _rx) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec!["test".to_owned()],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 2;
+        node.next_index.insert("test".to_owned(), 1);
+        node.state = State::Leader;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 2,
+            command: "cmd2".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd3".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 2,
+            command: "cmd4".to_string(),
+        });
+        node.handle_append_entries_reply(AppendEntriesReplyData {
+            term: 2,
+            success: false,
+            peer: "test".to_owned(),
+            entries_count: 0,
+        })
+        .await?;
+        assert_eq!(*node.next_index.get("test").unwrap(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_append_entries_same_term_does_not_reset_voted_for() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 2;
+        node.voted_for = Some("node2".to_string());
+        node.state = State::Follower;
+        let reply = node
+            .handle_append_entries(AppendEntriesData {
+                term: 2,
+                prev_log_index: 0,
+                prev_log_term: 0,
+                leader_commit: 0,
+                leader_id: "node2".to_string(),
+                entries: vec![],
+            })
+            .await?;
+        assert!(reply.success);
+        assert_eq!(node.voted_for, Some("node2".to_string()));
+        assert_eq!(node.current_term, 2);
         Ok(())
     }
 }
