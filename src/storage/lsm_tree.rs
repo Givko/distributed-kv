@@ -1,32 +1,32 @@
 use crate::raft::state_machine::StorageEngine;
 use crate::storage::entry::{Entry, OP_DELETE, OP_SET};
-use crate::storage::memtable::{MemTable, MemTableEntry, BTreeMapMemTable};
+use crate::storage::memtable::{BTreeMapMemTable, MemTable, MemTableEntry};
 use crate::storage::sstable::{SSTableStorageManager, SSTablesStorage};
 use crate::storage::wal::{Wal, WalStorage};
 use std::path::PathBuf;
 
-pub struct LSMTree<W: WalStorage = Wal> {
-    memtable: Box<dyn MemTable + Sync + Send>, 
-    wal: W,
+pub struct LSMTree {
+    memtable: Box<dyn MemTable + Sync + Send>,
+    wal: Box<dyn WalStorage + Sync + Send>,
     sstable_storage: Box<dyn SSTablesStorage + Sync + Send>,
     last_raft_index: u64,
 }
 
-impl LSMTree<Wal> {
+impl LSMTree {
     pub async fn new() -> Self {
-        Self::with_wal(Wal::new(PathBuf::from("wal.log")).await)
+        Self::with_wal(Box::new(Wal::new(PathBuf::from("wal.log")).await))
     }
 
     /// Creates an LSMTree whose WAL file is named `<sanitized_id>-wal.log`,
     /// where the node ID (e.g. `127.0.0.1:5051`) has `:` and `.` replaced by `_`.
     pub async fn with_node_id(id: &str) -> Self {
         let sanitized = id.replace(['.', ':'], "_");
-        Self::with_wal(Wal::new(PathBuf::from(format!("{sanitized}-wal.log"))).await)
+        Self::with_wal(Box::new(
+            Wal::new(PathBuf::from(format!("{sanitized}-wal.log"))).await,
+        ))
     }
-}
 
-impl<W: WalStorage> LSMTree<W> {
-    pub fn with_wal(wal: W) -> Self {
+    pub fn with_wal(wal: Box<dyn WalStorage + Sync + Send>) -> Self {
         LSMTree {
             memtable: Box::new(BTreeMapMemTable::new()),
             wal,
@@ -35,16 +35,34 @@ impl<W: WalStorage> LSMTree<W> {
         }
     }
 
-    fn flush_to_sstable(&mut self) {
-        // Implement logic to flush the memtable to an SSTable using self.sstable_storage.flush()
-        // After flushing, clear the memtable and reset last_raft_index if necessary.
-        let _cur_entries = self.memtable.to_entries();
-    
+    async fn flush_to_sstable(&mut self) {
+        //Save old memtable and wal for recovery if flush fails
+        let mut old_memtable =
+            std::mem::replace(&mut self.memtable, Box::new(BTreeMapMemTable::new()));
+        let old_wal_path = self.wal.path().to_owned();
+        let old_entries = old_memtable.to_entries();
+
+        let new_wal_path = old_wal_path.with_file_name(format!(
+            "{}-{}.log",
+            old_wal_path.file_stem().unwrap().to_string_lossy(),
+            self.last_raft_index
+        ));
+        self.wal = Box::new(Wal::new(new_wal_path).await); // Start a new WAL file for the new memtable
+        if let Err(e) = self.sstable_storage.flush(&old_entries) {
+            eprintln!("Failed to flush memtable to SSTable: {e}");
+
+            // If flush fails, we need to put the old memtable back so we don't lose data.
+
+            let new_entries = self.memtable.to_entries();
+            old_memtable.extend(new_entries);
+            self.memtable = old_memtable;
+            return;
+        }
     }
 }
 
 #[async_trait::async_trait]
-impl<W: WalStorage> StorageEngine for LSMTree<W> {
+impl StorageEngine for LSMTree {
     async fn get(&self, key: &[u8]) -> Option<MemTableEntry> {
         self.memtable.get(key).cloned()
     }
@@ -77,7 +95,7 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
                     match entry.op {
                         OP_SET => self.memtable.set(entry.index, entry.key, entry.value),
                         OP_DELETE => _ = self.memtable.delete(entry.index, &entry.key),
-                        _ => eprintln!("Unknown WAL entry op code: {}", entry.op)
+                        _ => eprintln!("Unknown WAL entry op code: {}", entry.op),
                     };
                 }
             }
@@ -96,15 +114,26 @@ mod tests {
     use crate::storage::entry::{Entry as WalEntry, OP_DELETE, OP_SET};
     use crate::storage::wal::WalStorage;
     use std::io;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     /// A WAL mock that records every written entry and replays them on `read_all`.
-    #[derive(Default)]
+    /// The `entries` field is wrapped in an `Arc<Mutex<...>>` so callers can keep
+    /// a clone of the `Arc` after handing ownership of the `RecordingWal` to
+    /// `LSMTree::with_wal`, and still inspect what was written.
+    #[derive(Default, Clone)]
     struct RecordingWal {
-        entries: Mutex<Vec<WalEntry>>,
+        entries: Arc<Mutex<Vec<WalEntry>>>,
+        path: PathBuf,
     }
 
     impl RecordingWal {
+        fn new() -> Self {
+            Self {
+                entries: Arc::new(Mutex::new(Vec::new())),
+                path: PathBuf::from("recording-wal.log"),
+            }
+        }
+
         fn recorded(&self) -> Vec<WalEntry> {
             self.entries.lock().unwrap().clone()
         }
@@ -120,10 +149,27 @@ mod tests {
         async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
             Ok(self.entries.lock().unwrap().clone())
         }
+
+        fn path(&self) -> &PathBuf {
+            &self.path
+        }
     }
 
-    fn make_tree() -> LSMTree<RecordingWal> {
-        LSMTree::with_wal(RecordingWal::default())
+    /// Creates a plain tree backed by a fresh `RecordingWal`.
+    fn make_tree() -> LSMTree {
+        LSMTree::with_wal(Box::new(RecordingWal::new()))
+    }
+
+    /// Creates a tree **and** returns a handle to the shared WAL entries so
+    /// tests can inspect what was written even after ownership moved into the tree.
+    fn make_tree_with_wal_spy() -> (LSMTree, Arc<Mutex<Vec<WalEntry>>>) {
+        let wal = RecordingWal::new();
+        let spy = Arc::clone(&wal.entries);
+        (LSMTree::with_wal(Box::new(wal)), spy)
+    }
+
+    fn recorded(spy: &Arc<Mutex<Vec<WalEntry>>>) -> Vec<WalEntry> {
+        spy.lock().unwrap().clone()
     }
 
     // ── get ──────────────────────────────────────────────────────────────────
@@ -140,7 +186,10 @@ mod tests {
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Value { logical_index: 1, value: b"v".to_vec() })
+            Some(MemTableEntry::Value {
+                logical_index: 1,
+                value: b"v".to_vec()
+            })
         );
     }
 
@@ -153,15 +202,18 @@ mod tests {
         tree.set(2, b"k".to_vec(), b"v2".to_vec()).await;
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Value { logical_index: 2, value: b"v2".to_vec() })
+            Some(MemTableEntry::Value {
+                logical_index: 2,
+                value: b"v2".to_vec()
+            })
         );
     }
 
     #[tokio::test]
     async fn test_set_writes_to_wal() {
-        let mut tree = make_tree();
+        let (mut tree, spy) = make_tree_with_wal_spy();
         tree.set(1, b"key".to_vec(), b"val".to_vec()).await;
-        let entries = tree.wal.recorded();
+        let entries = recorded(&spy);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].index, 1); // raft index passed through to WAL
         assert_eq!(entries[0].op, OP_SET); // op = SET
@@ -171,11 +223,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_wal_entries_carry_raft_indices() {
-        let mut tree = make_tree();
+        let (mut tree, spy) = make_tree_with_wal_spy();
         tree.set(1, b"a".to_vec(), b"1".to_vec()).await;
         tree.set(2, b"b".to_vec(), b"2".to_vec()).await;
         tree.set(3, b"c".to_vec(), b"3".to_vec()).await;
-        let entries = tree.wal.recorded();
+        let entries = recorded(&spy);
         assert_eq!(entries[0].index, 1);
         assert_eq!(entries[1].index, 2);
         assert_eq!(entries[2].index, 3);
@@ -188,14 +240,20 @@ mod tests {
         let mut tree = make_tree();
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
         tree.delete(2, b"k").await;
-        assert_eq!(tree.get(b"k").await, Some(MemTableEntry::Tombstone { logical_index: 2 }));
+        assert_eq!(
+            tree.get(b"k").await,
+            Some(MemTableEntry::Tombstone { logical_index: 2 })
+        );
     }
 
     #[tokio::test]
     async fn test_delete_missing_key_returns_false() {
         let mut tree = make_tree();
         tree.delete(1, b"missing").await;
-        assert_eq!(tree.get(b"missing").await, Some(MemTableEntry::Tombstone { logical_index: 1 }));
+        assert_eq!(
+            tree.get(b"missing").await,
+            Some(MemTableEntry::Tombstone { logical_index: 1 })
+        );
     }
 
     #[tokio::test]
@@ -204,7 +262,10 @@ mod tests {
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
         tree.delete(2, b"k").await;
         // Deleted key has a tombstone — distinguishable from a never-set key.
-        assert_eq!(tree.get(b"k").await, Some(MemTableEntry::Tombstone { logical_index: 2 }));
+        assert_eq!(
+            tree.get(b"k").await,
+            Some(MemTableEntry::Tombstone { logical_index: 2 })
+        );
     }
 
     #[tokio::test]
@@ -245,10 +306,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_writes_tombstone_to_wal() {
-        let mut tree = make_tree();
+        let (mut tree, spy) = make_tree_with_wal_spy();
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
         tree.delete(2, b"k").await;
-        let entries = tree.wal.recorded();
+        let entries = recorded(&spy);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].index, 1); // set got raft index 1
         assert_eq!(entries[1].index, 2); // delete got raft index 2
@@ -261,46 +322,55 @@ mod tests {
 
     #[tokio::test]
     async fn test_recover_replays_set_entries() {
-        let wal = RecordingWal::default();
+        let wal = RecordingWal::new();
         // Pre-populate the WAL as if a previous run wrote these entries.
         wal.entries.lock().unwrap().extend([
             WalEntry::set(1, b"k1".to_vec(), b"v1".to_vec()),
             WalEntry::set(2, b"k2".to_vec(), b"v2".to_vec()),
         ]);
-        let mut tree = LSMTree::with_wal(wal);
+        let mut tree = LSMTree::with_wal(Box::new(wal));
         tree.recover().await;
         assert_eq!(
             tree.get(b"k1").await,
-            Some(MemTableEntry::Value { logical_index: 1, value: b"v1".to_vec() })
+            Some(MemTableEntry::Value {
+                logical_index: 1,
+                value: b"v1".to_vec()
+            })
         );
         assert_eq!(
             tree.get(b"k2").await,
-            Some(MemTableEntry::Value { logical_index: 2, value: b"v2".to_vec() })
+            Some(MemTableEntry::Value {
+                logical_index: 2,
+                value: b"v2".to_vec()
+            })
         );
     }
 
     #[tokio::test]
     async fn test_recover_replays_tombstone_hides_key() {
-        let wal = RecordingWal::default();
+        let wal = RecordingWal::new();
         wal.entries.lock().unwrap().extend([
             WalEntry::set(1, b"k".to_vec(), b"v".to_vec()),
             WalEntry::delete(2, b"k".to_vec()),
         ]);
-        let mut tree = LSMTree::with_wal(wal);
+        let mut tree = LSMTree::with_wal(Box::new(wal));
         tree.recover().await;
         // After recovery the key carries a tombstone, not a value and not absent.
-        assert_eq!(tree.get(b"k").await, Some(MemTableEntry::Tombstone { logical_index: 2 }));
+        assert_eq!(
+            tree.get(b"k").await,
+            Some(MemTableEntry::Tombstone { logical_index: 2 })
+        );
     }
 
     #[tokio::test]
     async fn test_recover_tombstone_logical_index_matches_wal_entry() {
         // On recovery, the tombstone's logical_index must equal the WAL entry's raft index.
-        let wal = RecordingWal::default();
+        let wal = RecordingWal::new();
         wal.entries.lock().unwrap().extend([
             WalEntry::set(1, b"k".to_vec(), b"v".to_vec()),
             WalEntry::delete(4, b"k".to_vec()), // non-contiguous raft index
         ]);
-        let mut tree = LSMTree::with_wal(wal);
+        let mut tree = LSMTree::with_wal(Box::new(wal));
         tree.recover().await;
         assert_eq!(
             tree.get(b"k").await,
@@ -310,32 +380,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_recover_last_set_wins_over_earlier_set() {
-        let wal = RecordingWal::default();
+        let wal = RecordingWal::new();
         wal.entries.lock().unwrap().extend([
             WalEntry::set(1, b"k".to_vec(), b"v1".to_vec()),
             WalEntry::set(2, b"k".to_vec(), b"v2".to_vec()),
         ]);
-        let mut tree = LSMTree::with_wal(wal);
+        let mut tree = LSMTree::with_wal(Box::new(wal));
         tree.recover().await;
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Value { logical_index: 2, value: b"v2".to_vec() })
+            Some(MemTableEntry::Value {
+                logical_index: 2,
+                value: b"v2".to_vec()
+            })
         );
     }
 
     #[tokio::test]
     async fn test_recover_set_after_tombstone_is_visible() {
-        let wal = RecordingWal::default();
+        let wal = RecordingWal::new();
         wal.entries.lock().unwrap().extend([
             WalEntry::set(1, b"k".to_vec(), b"v1".to_vec()),
             WalEntry::delete(2, b"k".to_vec()),
             WalEntry::set(3, b"k".to_vec(), b"v2".to_vec()),
         ]);
-        let mut tree = LSMTree::with_wal(wal);
+        let mut tree = LSMTree::with_wal(Box::new(wal));
         tree.recover().await;
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Value { logical_index: 3, value: b"v2".to_vec() })
+            Some(MemTableEntry::Value {
+                logical_index: 3,
+                value: b"v2".to_vec()
+            })
         );
     }
 
@@ -356,15 +432,24 @@ mod tests {
         tree.set(3, b"c".to_vec(), b"3".to_vec()).await;
         assert_eq!(
             tree.get(b"a").await,
-            Some(MemTableEntry::Value { logical_index: 1, value: b"1".to_vec() })
+            Some(MemTableEntry::Value {
+                logical_index: 1,
+                value: b"1".to_vec()
+            })
         );
         assert_eq!(
             tree.get(b"b").await,
-            Some(MemTableEntry::Value { logical_index: 2, value: b"2".to_vec() })
+            Some(MemTableEntry::Value {
+                logical_index: 2,
+                value: b"2".to_vec()
+            })
         );
         assert_eq!(
             tree.get(b"c").await,
-            Some(MemTableEntry::Value { logical_index: 3, value: b"3".to_vec() })
+            Some(MemTableEntry::Value {
+                logical_index: 3,
+                value: b"3".to_vec()
+            })
         );
     }
 
@@ -377,7 +462,10 @@ mod tests {
         tree.set(3, b"k".to_vec(), b"v2".to_vec()).await;
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Value { logical_index: 3, value: b"v2".to_vec() })
+            Some(MemTableEntry::Value {
+                logical_index: 3,
+                value: b"v2".to_vec()
+            })
         );
     }
 
@@ -385,42 +473,49 @@ mod tests {
     async fn test_logical_index_preserved_after_recover_then_new_writes() {
         // Recover WAL entries with raft indices 1,2,3 then write new entries
         // with raft indices 4,5 — the LSM stores whatever index the caller provides.
-        let wal = RecordingWal::default();
+        let wal = RecordingWal::new();
         wal.entries.lock().unwrap().extend([
             WalEntry::set(1, b"k1".to_vec(), b"v1".to_vec()),
             WalEntry::set(2, b"k2".to_vec(), b"v2".to_vec()),
             WalEntry::delete(3, b"k1".to_vec()),
         ]);
-        let mut tree = LSMTree::with_wal(wal);
+        let mut tree = LSMTree::with_wal(Box::new(wal));
         tree.recover().await;
 
         tree.set(4, b"k3".to_vec(), b"v3".to_vec()).await;
         assert_eq!(
             tree.get(b"k3").await,
-            Some(MemTableEntry::Value { logical_index: 4, value: b"v3".to_vec() })
+            Some(MemTableEntry::Value {
+                logical_index: 4,
+                value: b"v3".to_vec()
+            })
         );
 
         tree.set(5, b"k4".to_vec(), b"v4".to_vec()).await;
         assert_eq!(
             tree.get(b"k4").await,
-            Some(MemTableEntry::Value { logical_index: 5, value: b"v4".to_vec() })
+            Some(MemTableEntry::Value {
+                logical_index: 5,
+                value: b"v4".to_vec()
+            })
         );
     }
 
     #[tokio::test]
     async fn test_wal_index_matches_raft_index_after_recover_then_new_writes() {
         // Verify WAL entries carry the exact raft index passed by the caller.
-        let wal = RecordingWal::default();
+        let wal = RecordingWal::new();
         wal.entries.lock().unwrap().extend([
             WalEntry::set(1, b"k1".to_vec(), b"v1".to_vec()),
             WalEntry::set(2, b"k2".to_vec(), b"v2".to_vec()),
         ]);
-        let mut tree = LSMTree::with_wal(wal);
+        let spy = Arc::clone(&wal.entries);
+        let mut tree = LSMTree::with_wal(Box::new(wal));
         tree.recover().await;
 
         tree.set(3, b"k3".to_vec(), b"v3".to_vec()).await;
         tree.delete(4, b"k1").await;
-        let entries = tree.wal.recorded();
+        let entries = recorded(&spy);
         assert_eq!(entries[2].index, 3); // new set with raft index 3
         assert_eq!(entries[3].index, 4); // new delete with raft index 4
     }
@@ -462,13 +557,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_last_applied_index_restored_after_recover() {
-        let wal = RecordingWal::default();
+        let wal = RecordingWal::new();
         wal.entries.lock().unwrap().extend([
             WalEntry::set(1, b"k1".to_vec(), b"v1".to_vec()),
             WalEntry::set(2, b"k2".to_vec(), b"v2".to_vec()),
             WalEntry::delete(3, b"k1".to_vec()),
         ]);
-        let mut tree = LSMTree::with_wal(wal);
+        let mut tree = LSMTree::with_wal(Box::new(wal));
         tree.recover().await;
         // Last WAL entry has raft index 3 → last_applied_index = 3.
         assert_eq!(tree.last_applied_index(), 3);

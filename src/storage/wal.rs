@@ -9,10 +9,12 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 pub trait WalStorage: Send + Sync {
     async fn append(&mut self, entry: &Entry) -> io::Result<()>;
     async fn read_all(&mut self) -> io::Result<Vec<Entry>>;
+    fn path(&self) -> &PathBuf;
 }
 
 pub struct Wal {
     file_handle: File,
+    path: PathBuf,
 }
 
 impl Wal {
@@ -24,7 +26,10 @@ impl Wal {
             .open(&path)
             .await
             .expect("Failed to open WAL file");
-        Self { file_handle: file }
+        Self {
+            file_handle: file,
+            path,
+        }
     }
 }
 
@@ -48,5 +53,9 @@ impl WalStorage for Wal {
         let entries = Encoder::decode_all(&buffer[cursor..])?;
         self.file_handle.rewind().await?;
         Ok(entries)
+    }
+
+    fn path(&self) -> &PathBuf {
+        &self.path
     }
 }

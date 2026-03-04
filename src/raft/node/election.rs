@@ -142,6 +142,7 @@ mod tests {
     use crate::storage::lsm_tree::LSMTree as RealLSMTree;
     use crate::storage::wal::WalStorage;
     use std::io;
+    use std::path::PathBuf;
 
     struct TestPersister;
 
@@ -156,13 +157,18 @@ mod tests {
         async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
             Ok(vec![])
         }
+
+        fn path(&self) -> &PathBuf {
+            static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+            PATH.get_or_init(|| PathBuf::from("mock-wal.log"))
+        }
     }
 
     struct LSMTree;
 
     impl LSMTree {
-        fn new() -> RealLSMTree<MockWal> {
-            RealLSMTree::with_wal(MockWal)
+        fn new() -> RealLSMTree {
+            RealLSMTree::with_wal(Box::new(MockWal))
         }
     }
 
