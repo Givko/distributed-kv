@@ -286,14 +286,13 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raft::raft_types::{
-        AppendEntriesData, RequestVoteData, RequestVoteReplyData,
-    };
+    use crate::raft::raft_types::{AppendEntriesData, RequestVoteData, RequestVoteReplyData};
     use crate::raft::state_persister::PersistentState;
     use crate::storage::entry::Entry as WalEntry;
     use crate::storage::lsm_tree::LSMTree as RealLSMTree;
     use crate::storage::wal::WalStorage;
     use std::io;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     struct TestPersister;
@@ -305,7 +304,9 @@ mod tests {
         saved_state: Arc<Mutex<Option<PersistentState>>>,
     }
 
-    struct MockWal;
+    struct MockWal {
+        path: PathBuf,
+    }
 
     #[async_trait::async_trait]
     impl WalStorage for MockWal {
@@ -316,10 +317,17 @@ mod tests {
         async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
             Ok(vec![])
         }
+
+        fn path(&self) -> &PathBuf {
+            &self.path
+        }
     }
 
     /// A mock WAL that returns a fixed, pre-loaded set of entries from `read_all`.
-    struct PreloadedMockWal(Vec<WalEntry>);
+    struct PreloadedMockWal {
+        entries: Vec<WalEntry>,
+        path: PathBuf,
+    }
 
     #[async_trait::async_trait]
     impl WalStorage for PreloadedMockWal {
@@ -328,15 +336,21 @@ mod tests {
         }
 
         async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
-            Ok(self.0.clone())
+            Ok(self.entries.clone())
+        }
+
+        fn path(&self) -> &PathBuf {
+            &self.path
         }
     }
 
     struct LSMTree;
 
     impl LSMTree {
-        fn new() -> RealLSMTree<MockWal> {
-            RealLSMTree::with_wal(MockWal)
+        fn new() -> RealLSMTree {
+            RealLSMTree::with_wal(Box::new(MockWal {
+                path: PathBuf::from("mock-wal.log"),
+            }))
         }
     }
 
@@ -494,16 +508,19 @@ mod tests {
         };
         // Pre-populate the WAL with the two committed entries so that WAL recovery
         // restores the state machine instead of relying on apply_commands.
-        let wal = PreloadedMockWal(vec![
-            WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
-            WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
-        ]);
+        let wal = PreloadedMockWal {
+            entries: vec![
+                WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
+                WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
+            ],
+            path: PathBuf::from("preloaded-mock-wal.log"),
+        };
         let node = Node::new(
             vec![],
             network_inbox,
             "node1".to_string(),
             persister,
-            RealLSMTree::with_wal(wal),
+            RealLSMTree::with_wal(Box::new(wal)),
         )
         .await?;
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
@@ -538,17 +555,20 @@ mod tests {
             },
         };
         // Pre-populate the WAL with all three committed entries.
-        let wal = PreloadedMockWal(vec![
-            WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
-            WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
-            WalEntry::set(3, b"key1".to_vec(), b"val3".to_vec()),
-        ]);
+        let wal = PreloadedMockWal {
+            entries: vec![
+                WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
+                WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
+                WalEntry::set(3, b"key1".to_vec(), b"val3".to_vec()),
+            ],
+            path: PathBuf::from("preloaded-mock-wal.log"),
+        };
         let node = Node::new(
             vec![],
             network_inbox,
             "node1".to_string(),
             persister,
-            RealLSMTree::with_wal(wal),
+            RealLSMTree::with_wal(Box::new(wal)),
         )
         .await?;
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val3");
@@ -581,16 +601,19 @@ mod tests {
                 commit_index: 2,
             },
         };
-        let wal = PreloadedMockWal(vec![
-            WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
-            WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
-        ]);
+        let wal = PreloadedMockWal {
+            entries: vec![
+                WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
+                WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
+            ],
+            path: PathBuf::from("preloaded-mock-wal.log"),
+        };
         let node = Node::new(
             vec![],
             network_inbox,
             "node1".to_string(),
             persister,
-            RealLSMTree::with_wal(wal),
+            RealLSMTree::with_wal(Box::new(wal)),
         )
         .await?;
         // last_applied must come from the WAL (highest raft index = 2).
@@ -622,16 +645,19 @@ mod tests {
                 commit_index: 2,
             },
         };
-        let wal = PreloadedMockWal(vec![
-            WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
-            WalEntry::set(2, b"key1".to_vec(), b"val2".to_vec()),
-        ]);
+        let wal = PreloadedMockWal {
+            entries: vec![
+                WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
+                WalEntry::set(2, b"key1".to_vec(), b"val2".to_vec()),
+            ],
+            path: PathBuf::from("preloaded-mock-wal.log"),
+        };
         let mut node = Node::new(
             vec![],
             network_inbox,
             "node1".to_string(),
             persister,
-            RealLSMTree::with_wal(wal),
+            RealLSMTree::with_wal(Box::new(wal)),
         )
         .await?;
         assert_eq!(node.last_applied, 2);
@@ -670,13 +696,16 @@ mod tests {
             },
         };
         // … but the WAL only recorded the first one before the crash.
-        let wal = PreloadedMockWal(vec![WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec())]);
+        let wal = PreloadedMockWal {
+            entries: vec![WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec())],
+            path: PathBuf::from("preloaded-mock-wal.log"),
+        };
         let node = Node::new(
             vec![],
             network_inbox,
             "node1".to_string(),
             persister,
-            RealLSMTree::with_wal(wal),
+            RealLSMTree::with_wal(Box::new(wal)),
         )
         .await?;
         // last_applied reflects WAL state only — the gap entry was not applied.
