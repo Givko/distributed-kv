@@ -1,10 +1,36 @@
 # distributed-kv
 
-A distributed key-value store in Rust. Raft consensus for replication, LSM storage engine for persistence, Redis-compatible wire protocol for client access.
+A learning project — a distributed key-value store implemented in Rust to understand Raft consensus and LSM storage engines from the inside out. Not intended for production use.
 
-Core distributed-systems logic (Raft) and storage engine components (LSM) are implemented from scratch — no embedded databases and no Raft/consensus libraries. The project uses tokio for async scheduling and tonic for RPC transport plumbing. RESP support is planned; today the client API is gRPC.
+Raft and the LSM engine are built from scratch — no embedded databases, no consensus libraries. The project uses tokio for async scheduling and tonic for gRPC transport. RESP support is planned; today the client API is gRPC.
 
 I built this to learn Raft and LSMs end-to-end by implementing the tricky parts myself — leader election edge cases, crash recovery ordering, WAL/SSTable durability guarantees.
+
+## Development Notes
+
+This is purely a learning project. The goal is to understand distributed systems and storage engine internals by implementing them, not to build something deployable.
+
+**Error handling** — `unwrap()`, `expect()`, and similar panic-on-failure calls appear throughout the codebase. These are intentional shortcuts while the focus is on understanding and implementing the core logic correctly. Proper error propagation will be tidied up once the implementation stabilises.
+
+## Status
+
+| Component | Status |
+|-----------|--------|
+| Raft consensus | ✅ Complete |
+| gRPC transport | ✅ Complete |
+| Persistent state + crash recovery | ✅ Complete |
+| Snapshot boundary tracking | ✅ Complete |
+| InstallSnapshot RPC | Planned |
+| LSM MemTable + WAL | ✅ Complete |
+| SSTable flush + read path | 🔄 In Progress |
+| Bloom filters | Planned |
+| Size-tiered compaction | Planned |
+| Raft ↔ LSM integration | Planned |
+| RESP wire protocol | Planned |
+
+## Architecture
+
+Current state machine: `BTreeMap`-backed LSM tree with a Write-Ahead Log. Planned: SSTable flush, bloom filters, and size-tiered compaction.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -29,10 +55,6 @@ I built this to learn Raft and LSMs end-to-end by implementing the tricky parts 
         │ Machine  │  │ Machine  │  │ Machine  │
         └──────────┘  └──────────┘  └──────────┘
 ```
-
-## Architecture
-
-Current state machine: `BTreeMap`-backed LSM tree with a Write-Ahead Log. Planned: SSTable flush, bloom filters, and size-tiered compaction.
 
 ### Raft Consensus Layer
 
@@ -75,19 +97,19 @@ Redis-compatible protocol layer so standard Redis clients (`redis-cli`, `go-redi
 ## Design Decisions
 
 ### Why Raft
-Raft is the industry standard for strong consistency in production systems — etcd, CockroachDB, TiKV, and Consul all use it. It's well-specified enough to implement correctly, and complex enough to expose real distributed systems challenges: leader election edge cases, log divergence after partitions, and crash recovery ordering.
+Raft is well-specified enough to implement correctly from a paper, and complex enough to expose real distributed systems challenges: leader election edge cases, log divergence after partitions, and crash recovery ordering. It's a good target for learning because the invariants are clearly defined and testable.
 
 ### Why actor-based concurrency
-The Raft node owns all its state — term, log, commit index, peer tracking — behind a single `tokio::select!` loop with an mpsc mailbox. No locks, no shared mutable state. gRPC requests become mailbox messages with oneshot reply channels; the network sender is a separate task that spawns per-RPC tasks so a slow peer can't block the main loop. It's basically Raft's event loop as an actor: one message at a time, no locks.
+The Raft node owns all its state — term, log, commit index, peer tracking — behind a single `tokio::select!` loop with an mpsc mailbox. No locks, no shared mutable state. gRPC requests become mailbox messages with oneshot reply channels; the network sender is a separate task that spawns per-RPC tasks so a slow peer can't block the main loop. A natural fit for Raft's single-threaded event loop model.
 
 ### Why LSM over B-tree
-LSM is write-optimized — all writes are sequential appends (WAL then SSTable flush). Good fit for a replicated store where every Raft apply is a write. Also the architecture behind RocksDB, LevelDB, and CockroachDB's Pebble.
+LSM is write-optimized — all writes are sequential appends (WAL then SSTable flush). It's also a good learning target: the WAL, memtable, SSTable, and compaction layers each teach something distinct about storage engine design.
 
 ### Why bytes, not strings
-The LSM engine will store `Vec<u8>` keys and values with lexicographic byte ordering. It never interprets the content. Type handling (strings for SET/GET, integers for INCR) belongs to the RESP layer above. This is the same separation used by RocksDB and LevelDB — the storage engine is a sorted byte map, nothing more.
+The LSM engine stores `Vec<u8>` keys and values with lexicographic byte ordering and never interprets the content. Type handling (strings for SET/GET, integers for INCR) belongs to the RESP layer above. Keeping the storage engine as a plain sorted byte map is a cleaner separation of concerns.
 
 ### Crash safety
-Whenever `current_term`, `voted_for`, or log entries change, they're serialized to disk and fsync'd before replying success. On restart, committed entries are replayed into the state machine, restoring full consistency. The LSM phase adds binary WAL with per-write fsync, SSTable flush with single fsync at end, and WAL deletion only after SSTable durability is confirmed.
+Whenever `current_term`, `voted_for`, or log entries change, they're serialized to disk and fsync'd before replying success. On restart, committed entries are replayed into the state machine. The LSM layer adds a binary WAL with per-write fsync, SSTable flush with a single fsync at the end, and WAL deletion only after the SSTable is durably on disk.
 
 ## Correctness Invariants
 
@@ -106,7 +128,7 @@ I'm intentionally keeping this to one Raft group so I can go deep on correctness
 
 - **No partitioning** — single Raft group. Partitioning (consistent hashing, range-based sharding, multi-Raft) is understood conceptually but adds breadth, not depth.
 - **No MVCC transactions** — single-key operations only. Multi-key transactions require snapshot isolation and timestamp ordering.
-- **No read linearizability** — GET is served by any node directly from the local state machine. Followers may return stale data, and a partitioned leader can serve stale reads until it discovers a new term. A production system would use read index or lease-based reads.
+- **No read linearizability** — GET is served by any node directly from the local state machine. Followers may return stale data, and a partitioned leader can serve stale reads until it discovers a new term. Read-index or lease-based reads would fix this but are out of scope.
 - **No pre-vote protocol** — a partitioned node that rejoins can trigger unnecessary elections by having a higher term. Pre-vote would let it check if an election is needed before incrementing its term.
 - **No InstallSnapshot RPC** — snapshot boundary tracking and log indexing are implemented, but lagging followers that fall behind the snapshot point cannot catch up. If this occurs, the follower must be wiped and rejoined manually.
 - **Heartbeat not per-peer optimized** — the leader sends the same AppendEntries to all peers using its own `last_log_index` rather than each peer's `next_index`, so it may resend entries a follower already has and trigger unnecessary backtracking on rejection. Mainly a performance wart.
@@ -187,22 +209,6 @@ The test suite uses mock persisters (TestPersister, LoadedStatePersister, Record
 **Snapshot boundary:** accepting AppendEntries when prev_log_index matches snapshot_last_index/term, rejecting when snapshot term doesn't match.
 
 **Safety invariants:** same-term heartbeats don't reset voted_for (preventing double-voting within a term).
-
-## Status
-
-| Component | Status |
-|-----------|--------|
-| Raft consensus | ✅ Complete |
-| gRPC transport | ✅ Complete |
-| Persistent state + crash recovery | ✅ Complete |
-| Snapshot boundary tracking | ✅ Complete |
-| InstallSnapshot RPC | Planned |
-| LSM MemTable + WAL | ✅ Complete |
-| SSTable flush + read path | 🔄 In Progress |
-| Bloom filters | Planned |
-| Size-tiered compaction | Planned |
-| Raft ↔ LSM integration | Planned |
-| RESP wire protocol | Planned |
 
 ## Built With
 
