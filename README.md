@@ -1,10 +1,6 @@
 # distributed-kv
 
-A learning project — a distributed key-value store implemented in Rust to understand Raft consensus and LSM storage engines from the inside out. Not intended for production use.
-
-Raft and the LSM engine are built from scratch — no embedded databases, no consensus libraries. The project uses tokio for async scheduling and tonic for gRPC transport. RESP support is planned; today the client API is gRPC.
-
-I built this to learn Raft and LSMs end-to-end by implementing the tricky parts myself — leader election edge cases, crash recovery ordering, WAL/SSTable durability guarantees.
+Distributed key-value store in Rust implementing Raft consensus and an LSM storage engine from scratch — no consensus or storage libraries. Built to gain hands-on depth in consensus protocols, crash recovery, and storage engine internals.
 
 ## Development Notes
 
@@ -131,7 +127,6 @@ I'm intentionally keeping this to one Raft group so I can go deep on correctness
 - **No read linearizability** — GET is served by any node directly from the local state machine. Followers may return stale data, and a partitioned leader can serve stale reads until it discovers a new term. Read-index or lease-based reads would fix this but are out of scope.
 - **No pre-vote protocol** — a partitioned node that rejoins can trigger unnecessary elections by having a higher term. Pre-vote would let it check if an election is needed before incrementing its term.
 - **No InstallSnapshot RPC** — snapshot boundary tracking and log indexing are implemented, but lagging followers that fall behind the snapshot point cannot catch up. If this occurs, the follower must be wiped and rejoined manually.
-- **Heartbeat not per-peer optimized** — the leader sends the same AppendEntries to all peers using its own `last_log_index` rather than each peer's `next_index`, so it may resend entries a follower already has and trigger unnecessary backtracking on rejection. Mainly a performance wart.
 - **Leader hint is empty after restart** — a restarted follower doesn't know the current leader until it receives its first heartbeat.
 
 ## Project Structure
