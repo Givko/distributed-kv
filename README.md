@@ -4,7 +4,7 @@ Distributed key-value store in Rust implementing Raft consensus and an LSM stora
 
 ## Development Notes
 
-This is purely a learning project. The goal is to understand distributed systems and storage engine internals by implementing them, not to build something deployable.
+The goal is to understand distributed systems and storage engine internals by implementing them, not to build something production ready.
 
 **Error handling** — `unwrap()`, `expect()`, and similar panic-on-failure calls appear throughout the codebase. These are intentional shortcuts while the focus is on understanding and implementing the core logic correctly. Proper error propagation will be tidied up once the implementation stabilises.
 
