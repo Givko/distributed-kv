@@ -181,6 +181,8 @@ mod tests {
                 voted_for: None,
                 entries: vec![],
                 commit_index: 0,
+                snapshot_last_index: 0,
+                snapshot_last_term: 0,
             })
         }
     }

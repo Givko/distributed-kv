@@ -12,7 +12,6 @@ const FLUSH_THRESHOLD_BYTES: usize = 1024 * 1024; // 1 MB
 pub struct LSMTree {
     memtable: Box<dyn MemTable + Sync + Send>,
     wal: Box<dyn WalStorage + Sync + Send>,
-    last_raft_index: u64,
 
     flushing_memtable: Option<Box<dyn MemTable + Sync + Send>>,
     flushing_wal: Option<Box<dyn WalStorage + Sync + Send>>,
@@ -33,7 +32,6 @@ impl LSMTree {
         LSMTree {
             memtable: Box::new(BTreeMapMemTable::new()),
             wal,
-            last_raft_index: 0,
 
             flushing_memtable: None,
             flushing_wal: None,
@@ -45,11 +43,11 @@ impl LSMTree {
         let file_path = "wal.log";
         let tmp_file_path = format!("{}.tmp", file_path);
 
+        tokio::fs::rename(file_path, &tmp_file_path).await?;
         //Save old memtable and wal for recovery if flush fails
         let new_wal_path = PathBuf::from(file_path);
         let new_wal = Box::new(Wal::new(new_wal_path).await); // Start a new WAL file for the new memtable
 
-        tokio::fs::rename(file_path, &tmp_file_path).await?;
         self.flushing_memtable = Some(std::mem::replace(
             &mut self.memtable,
             Box::new(BTreeMapMemTable::new()),
@@ -84,7 +82,6 @@ impl StorageEngine for LSMTree {
             .append(&set_entry)
             .await
             .expect("Failed to write to WAL");
-        self.last_raft_index = raft_index;
         self.memtable.set(raft_index, key, value);
         if self.memtable.size_bytes() >= FLUSH_THRESHOLD_BYTES
             && self.flushing_memtable.is_none()
@@ -95,7 +92,7 @@ impl StorageEngine for LSMTree {
         }
 
         if self.flushing_memtable.is_some()
-            && let Ok(exists) = tokio::fs::try_exists("wal.log.tml").await
+            && let Ok(exists) = tokio::fs::try_exists("wal.log.tmp").await
             && !exists
         {
             // if the flushing wal is missing it means flushing has completed successfully
@@ -111,16 +108,12 @@ impl StorageEngine for LSMTree {
             .append(&delete_entry)
             .await
             .expect("Failed to write to WAL");
-        self.last_raft_index = raft_index;
         self.memtable.delete(raft_index, key)
     }
 
     async fn recover(&mut self) -> anyhow::Result<()> {
         match self.wal.read_all().await {
             Ok(entries) => {
-                if let Some(last_entry) = entries.last() {
-                    self.last_raft_index = last_entry.index;
-                }
                 self.memtable.extend(entries);
             }
             Err(e) => {
@@ -169,10 +162,6 @@ impl StorageEngine for LSMTree {
         });
 
         Ok(())
-    }
-
-    fn last_applied_index(&self) -> u64 {
-        self.last_raft_index
     }
 }
 
@@ -576,61 +565,5 @@ mod tests {
         let entries = recorded(&spy);
         assert_eq!(entries[2].index, 3); // new set with raft index 3
         assert_eq!(entries[3].index, 4); // new delete with raft index 4
-    }
-
-    // ── last_applied_index ───────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_last_applied_index_is_zero_for_empty_tree() {
-        let tree = make_tree();
-        assert_eq!(tree.last_applied_index(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_last_applied_index_tracks_raft_index_after_set() {
-        let mut tree = make_tree();
-        tree.set(1, b"k1".to_vec(), b"v1".to_vec()).await;
-        assert_eq!(tree.last_applied_index(), 1);
-        tree.set(2, b"k2".to_vec(), b"v2".to_vec()).await;
-        assert_eq!(tree.last_applied_index(), 2);
-        tree.set(3, b"k3".to_vec(), b"v3".to_vec()).await;
-        assert_eq!(tree.last_applied_index(), 3);
-    }
-
-    #[tokio::test]
-    async fn test_last_applied_index_tracks_raft_index_after_delete() {
-        let mut tree = make_tree();
-        tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
-        assert_eq!(tree.last_applied_index(), 1);
-        tree.delete(2, b"k").await;
-        assert_eq!(tree.last_applied_index(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_last_applied_index_tracks_delete_of_missing_key() {
-        let mut tree = make_tree();
-        tree.delete(1, b"nonexistent").await;
-        assert_eq!(tree.last_applied_index(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_last_applied_index_restored_after_recover() {
-        let wal = RecordingWal::new();
-        wal.entries.lock().unwrap().extend([
-            WalEntry::set(1, b"k1".to_vec(), b"v1".to_vec()),
-            WalEntry::set(2, b"k2".to_vec(), b"v2".to_vec()),
-            WalEntry::delete(3, b"k1".to_vec()),
-        ]);
-        let mut tree = LSMTree::with_wal(Box::new(wal));
-        _ = tree.recover().await;
-        // Last WAL entry has raft index 3 → last_applied_index = 3.
-        assert_eq!(tree.last_applied_index(), 3);
-    }
-
-    #[tokio::test]
-    async fn test_last_applied_index_zero_after_recover_from_empty_wal() {
-        let mut tree = make_tree();
-        _ = tree.recover().await;
-        assert_eq!(tree.last_applied_index(), 0);
     }
 }

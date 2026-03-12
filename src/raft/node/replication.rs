@@ -68,6 +68,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         if append_request.prev_log_index != 0
             && self.last_log_index() > append_request.prev_log_index
             && append_request.prev_log_index >= self.snapshot_last_index
+            && !append_request.entries.is_empty()
         {
             let truncate_to = (append_request.prev_log_index - self.snapshot_last_index) as usize;
             self.entries.truncate(truncate_to);
@@ -244,6 +245,8 @@ mod tests {
                 voted_for: None,
                 entries: vec![],
                 commit_index: 0,
+                snapshot_last_index: 0,
+                snapshot_last_term: 0,
             })
         }
     }
