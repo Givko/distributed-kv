@@ -79,19 +79,23 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         node.voted_for = init_node_state.voted_for;
         node.entries = init_node_state.entries;
         node.commit_index = init_node_state.commit_index;
+        node.snapshot_last_index = init_node_state.snapshot_last_index;
+        node.snapshot_last_term = init_node_state.snapshot_last_term;
+        node.last_applied = node.snapshot_last_index;
 
         // Recover state machine
         // before applying any committed entries to ensure the state machine is up to date
         // with the latest persisted state
         node.state_machine.recover().await?;
-
-        // last_applied is derived from the WAL: it reflects exactly how many
-        // Raft entries the state machine has durably applied (WAL entry count
-        // equals the 1-based Raft log index of the last applied command).
-        node.last_applied = node.state_machine.last_applied_index();
         eprintln!(
-            "Node {} initialized with term {}, voted_for {:?}, commit_index {}, last_applied {}",
-            node.id, node.current_term, node.voted_for, node.commit_index, node.last_applied
+            "Node {} initialized with term {}, voted_for {:?}, commit_index {}, last_applied {}, snapshot_last_index {}, snapshot_last_term {}",
+            node.id,
+            node.current_term,
+            node.voted_for,
+            node.commit_index,
+            node.last_applied,
+            node.snapshot_last_index,
+            node.snapshot_last_term
         );
         Ok(node)
     }
@@ -137,6 +141,8 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             voted_for: self.voted_for.clone(),
             entries: self.entries.clone(),
             commit_index: self.commit_index,
+            snapshot_last_index: self.snapshot_last_index,
+            snapshot_last_term: self.snapshot_last_term,
         };
         self.state_persister.save_state(&persistent_state).await?;
         Ok(())
@@ -267,6 +273,9 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             self.send_to_reply_channel(reply_channel, reply)?;
         }
 
+        //ideally we should do this on each command, but for simplicity we will just do it after applying all committed commands
+        self.persist_state().await?;
+
         Ok(())
     }
 
@@ -360,6 +369,8 @@ mod tests {
                 voted_for: None,
                 entries: vec![],
                 commit_index: 0,
+                snapshot_last_index: 0,
+                snapshot_last_term: 0,
             })
         }
     }
@@ -378,6 +389,8 @@ mod tests {
                 voted_for: self.state.voted_for.clone(),
                 entries: self.state.entries.clone(),
                 commit_index: self.state.commit_index,
+                snapshot_last_index: self.state.snapshot_last_index,
+                snapshot_last_term: self.state.snapshot_last_term,
             })
         }
     }
@@ -404,6 +417,8 @@ mod tests {
                 voted_for: state.voted_for.clone(),
                 entries: state.entries.clone(),
                 commit_index: state.commit_index,
+                snapshot_last_index: state.snapshot_last_index,
+                snapshot_last_term: state.snapshot_last_term,
             });
             Ok(())
         }
@@ -416,6 +431,8 @@ mod tests {
                 voted_for: None,
                 entries: vec![],
                 commit_index: 0,
+                snapshot_last_index: 0,
+                snapshot_last_term: 0,
             })
         }
     }
@@ -439,6 +456,8 @@ mod tests {
                     },
                 ],
                 commit_index: 2,
+                snapshot_last_index: 1,
+                snapshot_last_term: 5,
             },
         };
         let node = Node::new(
@@ -457,6 +476,8 @@ mod tests {
         assert_eq!(node.entries[1].term, 7);
         assert_eq!(node.entries[1].command, "set key2 val2");
         assert_eq!(node.commit_index, 2);
+        assert_eq!(node.snapshot_last_index, 1);
+        assert_eq!(node.snapshot_last_term, 5);
         Ok(())
     }
 
@@ -496,6 +517,8 @@ mod tests {
                     },
                 ],
                 commit_index: 2,
+                snapshot_last_index: 2,
+                snapshot_last_term: 4,
             },
         };
         // Pre-populate the WAL with the two committed entries so that WAL recovery
@@ -518,6 +541,8 @@ mod tests {
         assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
         assert_eq!(node.last_applied, 2);
         assert_eq!(node.commit_index, 2);
+        assert_eq!(node.snapshot_last_index, 2);
+        assert_eq!(node.snapshot_last_term, 4);
         Ok(())
     }
 
@@ -543,6 +568,8 @@ mod tests {
                     },
                 ],
                 commit_index: 3,
+                snapshot_last_index: 3,
+                snapshot_last_term: 4,
             },
         };
         // Pre-populate the WAL with all three committed entries.
@@ -565,6 +592,8 @@ mod tests {
         assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
         assert_eq!(node.last_applied, 3);
         assert_eq!(node.commit_index, 3);
+        assert_eq!(node.snapshot_last_index, 3);
+        assert_eq!(node.snapshot_last_term, 4);
         Ok(())
     }
 
@@ -589,6 +618,8 @@ mod tests {
                     },
                 ],
                 commit_index: 2,
+                snapshot_last_index: 2,
+                snapshot_last_term: 1,
             },
         };
         let wal = PreloadedMockWal {
@@ -632,6 +663,8 @@ mod tests {
                     },
                 ],
                 commit_index: 2,
+                snapshot_last_index: 2,
+                snapshot_last_term: 1,
             },
         };
         let wal = PreloadedMockWal {
@@ -681,6 +714,8 @@ mod tests {
                 ],
                 // Both entries are committed according to persisted Raft state …
                 commit_index: 2,
+                snapshot_last_index: 1,
+                snapshot_last_term: 4,
             },
         };
         // … but the WAL only recorded the first one before the crash.
@@ -698,6 +733,8 @@ mod tests {
         // last_applied reflects WAL state only — the gap entry was not applied.
         assert_eq!(node.last_applied, 1);
         assert_eq!(node.commit_index, 2);
+        assert_eq!(node.snapshot_last_index, 1);
+        assert_eq!(node.snapshot_last_term, 4);
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
         // key2 was never flushed to WAL, so it must be absent.
         assert!(node.state_machine.get("key2").await.is_none());

@@ -11,8 +11,6 @@ pub trait StorageEngine {
     async fn get(&self, key: &[u8]) -> Option<MemTableEntry>;
 
     async fn recover(&mut self) -> anyhow::Result<()>;
-
-    fn last_applied_index(&self) -> u64;
 }
 
 pub struct StateMachine<SM: StorageEngine> {
@@ -24,17 +22,8 @@ impl<SM: StorageEngine> StateMachine<SM> {
         StateMachine { engine }
     }
 
-    pub fn last_applied_index(&self) -> u64 {
-        // For simplicity, we won't track the last applied index in this example.
-        self.engine.last_applied_index()
-    }
-
     pub async fn recover(&mut self) -> anyhow::Result<()> {
         self.engine.recover().await?;
-        eprintln!(
-            "State machine with last applied index {}",
-            self.last_applied_index()
-        );
         Ok(())
     }
 
@@ -109,10 +98,6 @@ mod tests {
         async fn recover(&mut self) -> anyhow::Result<()> {
             // No-op for the mock engine
             Ok(())
-        }
-
-        fn last_applied_index(&self) -> u64 {
-            0
         }
     }
 
