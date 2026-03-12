@@ -1,7 +1,7 @@
 use tokio::fs::OpenOptions;
 
 use crate::raft::state_machine::StorageEngine;
-use crate::storage::entry::{Entry, OP_DELETE, OP_SET};
+use crate::storage::entry::Entry;
 use crate::storage::memtable::{BTreeMapMemTable, MemTable, MemTableEntry};
 use crate::storage::sstable::{SSTableStorageManager, SSTablesStorage};
 use crate::storage::wal::{Wal, WalStorage};
@@ -118,14 +118,10 @@ impl StorageEngine for LSMTree {
     async fn recover(&mut self) -> anyhow::Result<()> {
         match self.wal.read_all().await {
             Ok(entries) => {
-                for entry in entries {
-                    self.last_raft_index = entry.index;
-                    match entry.op {
-                        OP_SET => self.memtable.set(entry.index, entry.key, entry.value),
-                        OP_DELETE => _ = self.memtable.delete(entry.index, &entry.key),
-                        _ => eprintln!("Unknown WAL entry op code: {}", entry.op),
-                    };
+                if let Some(last_entry) = entries.last() {
+                    self.last_raft_index = last_entry.index;
                 }
+                self.memtable.extend(entries);
             }
             Err(e) => {
                 eprintln!("Failed to read WAL during recovery: {e}");
@@ -152,24 +148,7 @@ impl StorageEngine for LSMTree {
         self.flushing_memtable = Some(Box::new(BTreeMapMemTable::new())); // Start with a fresh memtable for the new WAL
         match self.flushing_wal.as_mut().unwrap().read_all().await {
             Ok(entries) => {
-                for entry in entries {
-                    self.last_raft_index = entry.index;
-                    match entry.op {
-                        OP_SET => self.flushing_memtable.as_mut().unwrap().set(
-                            entry.index,
-                            entry.key,
-                            entry.value,
-                        ),
-                        OP_DELETE => {
-                            _ = self
-                                .flushing_memtable
-                                .as_mut()
-                                .unwrap()
-                                .delete(entry.index, &entry.key)
-                        }
-                        _ => eprintln!("Unknown WAL entry op code: {}", entry.op),
-                    };
-                }
+                self.flushing_memtable.as_mut().unwrap().extend(entries);
             }
             Err(e) => {
                 eprintln!("Failed to read flushing WAL during recovery: {e}");
