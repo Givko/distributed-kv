@@ -33,9 +33,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             || (append_request.prev_log_index != 0
                 && self.get_log_term(append_request.prev_log_index) != append_request.prev_log_term)
         {
-            eprintln!("current_term {}", self.current_term);
-            eprintln!("prev_log_index {}", append_request.prev_log_index);
-            eprintln!("prev_log_term {}", append_request.prev_log_term);
             self.state = if self.current_term < append_request.term {
                 State::Follower
             } else {
@@ -206,7 +203,6 @@ mod tests {
     use crate::storage::lsm_tree::LSMTree as RealLSMTree;
     use crate::storage::wal::WalStorage;
     use std::io;
-    use std::path::PathBuf;
 
     struct TestPersister;
 
