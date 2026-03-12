@@ -41,15 +41,14 @@ impl LSMTree {
 
     async fn flush_to_sstable(&mut self) -> anyhow::Result<()> {
         // rename old WAL as flushing to be able to locate it on recovery if flush fails
-        let file_path = self.wal.path();
-        let tmp_file_path = format!("{}.tmp", file_path.to_string_lossy());
-        tokio::fs::rename(tmp_file_path, file_path).await?;
+        let file_path = "wal.log";
+        let tmp_file_path = format!("{}.tmp", file_path);
 
         //Save old memtable and wal for recovery if flush fails
-        let new_path = "wal.log";
-        let new_wal_path = PathBuf::from(new_path);
+        let new_wal_path = PathBuf::from(file_path);
         let new_wal = Box::new(Wal::new(new_wal_path).await); // Start a new WAL file for the new memtable
 
+        tokio::fs::rename(file_path, &tmp_file_path).await?;
         self.flushing_memtable = Some(std::mem::replace(
             &mut self.memtable,
             Box::new(BTreeMapMemTable::new()),
@@ -115,7 +114,7 @@ impl StorageEngine for LSMTree {
         //since the flush might have failed after WAL rotation but before
         //the old WAL was deleted
         let file_result = OpenOptions::new().read(true).open("wal.log.tmp").await;
-        _ = match file_result {
+        let flush_wal = match file_result {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(()); // No flushing WAL, nothing more to recover
@@ -125,9 +124,9 @@ impl StorageEngine for LSMTree {
                 return Err(anyhow::anyhow!(e));
             }
         };
-        let flushing_wal = Box::new(Wal::new(PathBuf::from("wal.log.tmp")).await);
+        let flushing_wal = Box::new(Wal::from_file(flush_wal));
         self.flushing_wal = Some(flushing_wal);
-        self.memtable = Box::new(BTreeMapMemTable::new()); // Start with a fresh memtable for the new WAL
+        self.flushing_memtable = Some(Box::new(BTreeMapMemTable::new())); // Start with a fresh memtable for the new WAL
         match self.flushing_wal.as_mut().unwrap().read_all().await {
             Ok(entries) => {
                 for entry in entries {
@@ -210,10 +209,6 @@ mod tests {
 
         async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
             Ok(self.entries.lock().unwrap().clone())
-        }
-
-        fn path(&self) -> &PathBuf {
-            &self.path
         }
     }
 
