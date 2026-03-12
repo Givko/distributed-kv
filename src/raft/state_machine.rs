@@ -10,7 +10,7 @@ pub trait StorageEngine {
     /// it exists, or `Some(Entry::Tombstone)` if it was deleted.
     async fn get(&self, key: &[u8]) -> Option<MemTableEntry>;
 
-    async fn recover(&mut self);
+    async fn recover(&mut self) -> anyhow::Result<()>;
 
     fn last_applied_index(&self) -> u64;
 }
@@ -29,12 +29,13 @@ impl<SM: StorageEngine> StateMachine<SM> {
         self.engine.last_applied_index()
     }
 
-    pub async fn recover(&mut self) {
-        self.engine.recover().await;
+    pub async fn recover(&mut self) -> anyhow::Result<()> {
+        self.engine.recover().await?;
         eprintln!(
             "State machine with last applied index {}",
             self.last_applied_index()
         );
+        Ok(())
     }
 
     pub async fn apply(&mut self, raft_index: u64, command: String) -> anyhow::Result<()> {
@@ -48,7 +49,11 @@ impl<SM: StorageEngine> StateMachine<SM> {
         match cmd.as_str() {
             "set" if parts.len() == 3 => {
                 self.engine
-                    .set(raft_index, parts[1].as_bytes().to_vec(), parts[2].as_bytes().to_vec())
+                    .set(
+                        raft_index,
+                        parts[1].as_bytes().to_vec(),
+                        parts[2].as_bytes().to_vec(),
+                    )
                     .await;
                 Ok(())
             }
@@ -65,7 +70,10 @@ impl<SM: StorageEngine> StateMachine<SM> {
 
     pub async fn get(&self, key: &str) -> Option<String> {
         match self.engine.get(key.as_bytes()).await {
-            Some(MemTableEntry::Value { logical_index: _, value }) => String::from_utf8(value).ok(),
+            Some(MemTableEntry::Value {
+                logical_index: _,
+                value,
+            }) => String::from_utf8(value).ok(),
             _ => None,
         }
     }
@@ -92,10 +100,16 @@ mod tests {
         }
 
         async fn get(&self, key: &[u8]) -> Option<MemTableEntry> {
-            self.data.get(key).map(|v| MemTableEntry::Value { logical_index: 0, value: v.clone() })
+            self.data.get(key).map(|v| MemTableEntry::Value {
+                logical_index: 0,
+                value: v.clone(),
+            })
         }
 
-        async fn recover(&mut self) {}
+        async fn recover(&mut self) -> anyhow::Result<()> {
+            // No-op for the mock engine
+            Ok(())
+        }
 
         fn last_applied_index(&self) -> u64 {
             0
