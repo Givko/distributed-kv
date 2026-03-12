@@ -3,6 +3,7 @@ use crate::raft::raft_types::{ChangeStateReply, LogEntry, RaftMsg};
 use crate::raft::state_machine::StateMachine;
 use crate::raft::state_machine::StorageEngine;
 use crate::raft::state_persister::{PersistentState, Persister};
+use crate::storage::entry;
 use rand::Rng;
 use std::{collections::HashMap, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -83,7 +84,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         // Recover state machine
         // before applying any committed entries to ensure the state machine is up to date
         // with the latest persisted state
-        node.state_machine.recover().await;
+        node.state_machine.recover().await?;
 
         // last_applied is derived from the WAL: it reflects exactly how many
         // Raft entries the state machine has durably applied (WAL entry count
@@ -244,15 +245,20 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             return Ok(());
         }
 
-        for i in self.last_applied + 1..=self.commit_index {
-            let command = self
+        let range = self.last_applied + 1..=self.commit_index;
+        for i in range {
+            let entry = self
                 .get_log_entry(i)
                 .expect("committed entry missing from log")
-                .command
                 .clone();
+            let command = entry.command.clone();
 
             self.state_machine.apply(i, command).await?;
             self.last_applied = i;
+            self.entries
+                .remove((i - self.snapshot_last_index) as usize - 1);
+            self.snapshot_last_index = i;
+            self.snapshot_last_term = entry.term;
 
             let reply_channel = self.pending_clients.remove(&i);
             let reply = ChangeStateReply {
@@ -789,6 +795,9 @@ mod tests {
         assert!(res2.success);
         assert!(res3.success);
         assert_eq!(node.last_applied, node.commit_index);
+        assert_eq!(node.snapshot_last_index, node.commit_index);
+        assert_eq!(node.snapshot_last_term, 1);
+        assert_eq!(node.entries.len(), 0);
         Ok(())
     }
 
@@ -806,22 +815,25 @@ mod tests {
         .await?;
         node.current_term = 1;
         node.state = State::Leader;
-        node.commit_index = 3;
-        node.last_applied = 1;
-        node.state_machine
-            .apply(1, "set key1 val1".to_string())
-            .await
-            .unwrap();
+        node.commit_index = 1;
         node.entries.push(LogEntry {
             term: 1,
             command: "set key1 val3".to_string(),
         });
+        node.apply_commands().await?;
+        assert_eq!(node.state_machine.get("key1").await.unwrap(), "val3");
+        assert_eq!(node.last_applied, node.commit_index);
+        assert_eq!(node.snapshot_last_index, node.commit_index);
+        assert_eq!(node.snapshot_last_term, 1);
+        assert_eq!(node.entries.len(), 0);
+
+        node.commit_index = 3;
         node.entries.push(LogEntry {
             term: 1,
             command: "set key2 val2".to_string(),
         });
         node.entries.push(LogEntry {
-            term: 1,
+            term: 2,
             command: "set key3 val3".to_string(),
         });
         let (snd2, rcv2) = tokio::sync::oneshot::channel::<ChangeStateReply>();
@@ -831,12 +843,16 @@ mod tests {
         node.apply_commands().await?;
         let res2 = rcv2.await?;
         let res3 = rcv3.await?;
-        assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
+        assert_eq!(node.state_machine.get("key1").await.unwrap(), "val3");
         assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
         assert_eq!(node.state_machine.get("key3").await.unwrap(), "val3");
         assert!(res2.success);
         assert!(res3.success);
         assert_eq!(node.last_applied, node.commit_index);
+        assert_eq!(node.snapshot_last_index, node.commit_index);
+        assert_eq!(node.snapshot_last_term, 2);
+        assert_eq!(node.entries.len(), 0);
+
         Ok(())
     }
 

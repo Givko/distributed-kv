@@ -1,3 +1,5 @@
+use tokio::fs::OpenOptions;
+
 use crate::raft::state_machine::StorageEngine;
 use crate::storage::entry::{Entry, OP_DELETE, OP_SET};
 use crate::storage::memtable::{BTreeMapMemTable, MemTable, MemTableEntry};
@@ -8,8 +10,10 @@ use std::path::PathBuf;
 pub struct LSMTree {
     memtable: Box<dyn MemTable + Sync + Send>,
     wal: Box<dyn WalStorage + Sync + Send>,
-    sstable_storage: Box<dyn SSTablesStorage + Sync + Send>,
     last_raft_index: u64,
+
+    flushing_memtable: Option<Box<dyn MemTable + Sync + Send>>,
+    flushing_wal: Option<Box<dyn WalStorage + Sync + Send>>,
 }
 
 impl LSMTree {
@@ -21,43 +25,45 @@ impl LSMTree {
     /// where the node ID (e.g. `127.0.0.1:5051`) has `:` and `.` replaced by `_`.
     pub async fn with_node_id(id: &str) -> Self {
         let sanitized = id.replace(['.', ':'], "_");
-        Self::with_wal(Box::new(
-            Wal::new(PathBuf::from(format!("{sanitized}-wal.log"))).await,
-        ))
+        Self::with_wal(Box::new(Wal::new(PathBuf::from(format!("wal.log"))).await))
     }
 
     pub fn with_wal(wal: Box<dyn WalStorage + Sync + Send>) -> Self {
         LSMTree {
             memtable: Box::new(BTreeMapMemTable::new()),
             wal,
-            sstable_storage: Box::new(SSTableStorageManager::new()), // Replace with actual initialization
             last_raft_index: 0,
+
+            flushing_memtable: None,
+            flushing_wal: None,
         }
     }
 
-    async fn flush_to_sstable(&mut self) {
+    async fn flush_to_sstable(&mut self) -> anyhow::Result<()> {
+        // rename old WAL as flushing to be able to locate it on recovery if flush fails
+        let file_path = self.wal.path();
+        let tmp_file_path = format!("{}.tmp", file_path.to_string_lossy());
+        tokio::fs::rename(tmp_file_path, file_path).await?;
+
         //Save old memtable and wal for recovery if flush fails
-        let mut old_memtable =
-            std::mem::replace(&mut self.memtable, Box::new(BTreeMapMemTable::new()));
-        let old_wal_path = self.wal.path().to_owned();
-        let old_entries = old_memtable.to_entries();
+        let new_path = "wal.log";
+        let new_wal_path = PathBuf::from(new_path);
+        let new_wal = Box::new(Wal::new(new_wal_path).await); // Start a new WAL file for the new memtable
 
-        let new_wal_path = old_wal_path.with_file_name(format!(
-            "{}-{}.log",
-            old_wal_path.file_stem().unwrap().to_string_lossy(),
-            self.last_raft_index
+        self.flushing_memtable = Some(std::mem::replace(
+            &mut self.memtable,
+            Box::new(BTreeMapMemTable::new()),
         ));
-        self.wal = Box::new(Wal::new(new_wal_path).await); // Start a new WAL file for the new memtable
-        if let Err(e) = self.sstable_storage.flush(&old_entries) {
-            eprintln!("Failed to flush memtable to SSTable: {e}");
+        self.flushing_wal = Some(std::mem::replace(&mut self.wal, new_wal));
 
-            // If flush fails, we need to put the old memtable back so we don't lose data.
+        let old_entries = self.flushing_memtable.as_ref().unwrap().to_entries();
+        tokio::spawn(async move {
+            if let Err(e) = SSTableStorageManager::flush(&old_entries).await {
+                eprintln!("Failed to flush memtable to SSTable: {e}");
+            }
+        });
 
-            let new_entries = self.memtable.to_entries();
-            old_memtable.extend(new_entries);
-            self.memtable = old_memtable;
-            return;
-        }
+        Ok(())
     }
 }
 
@@ -87,7 +93,7 @@ impl StorageEngine for LSMTree {
         self.memtable.delete(raft_index, key)
     }
 
-    async fn recover(&mut self) {
+    async fn recover(&mut self) -> anyhow::Result<()> {
         match self.wal.read_all().await {
             Ok(entries) => {
                 for entry in entries {
@@ -99,8 +105,64 @@ impl StorageEngine for LSMTree {
                     };
                 }
             }
-            Err(e) => eprintln!("Failed to read WAL during recovery: {e}"),
+            Err(e) => {
+                eprintln!("Failed to read WAL during recovery: {e}");
+                return Err(anyhow::anyhow!(e));
+            }
         }
+
+        // try and open the flushing WAL if it exists and replay it as well,
+        //since the flush might have failed after WAL rotation but before
+        //the old WAL was deleted
+        let file_result = OpenOptions::new().read(true).open("wal.log.tmp").await;
+        _ = match file_result {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(()); // No flushing WAL, nothing more to recover
+            }
+            Err(e) => {
+                eprintln!("Failed to open flushing WAL during recovery: {e}");
+                return Err(anyhow::anyhow!(e));
+            }
+        };
+        let flushing_wal = Box::new(Wal::new(PathBuf::from("wal.log.tmp")).await);
+        self.flushing_wal = Some(flushing_wal);
+        self.memtable = Box::new(BTreeMapMemTable::new()); // Start with a fresh memtable for the new WAL
+        match self.flushing_wal.as_mut().unwrap().read_all().await {
+            Ok(entries) => {
+                for entry in entries {
+                    self.last_raft_index = entry.index;
+                    match entry.op {
+                        OP_SET => self.flushing_memtable.as_mut().unwrap().set(
+                            entry.index,
+                            entry.key,
+                            entry.value,
+                        ),
+                        OP_DELETE => {
+                            _ = self
+                                .flushing_memtable
+                                .as_mut()
+                                .unwrap()
+                                .delete(entry.index, &entry.key)
+                        }
+                        _ => eprintln!("Unknown WAL entry op code: {}", entry.op),
+                    };
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to read flushing WAL during recovery: {e}");
+                return Err(anyhow::anyhow!(e));
+            }
+        }
+
+        let old_entries = self.flushing_memtable.as_ref().unwrap().to_entries();
+        tokio::spawn(async move {
+            if let Err(e) = SSTableStorageManager::flush(&old_entries).await {
+                eprintln!("Failed to flush memtable to SSTable: {e}");
+            }
+        });
+
+        Ok(())
     }
 
     fn last_applied_index(&self) -> u64 {

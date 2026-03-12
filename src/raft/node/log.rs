@@ -1,7 +1,7 @@
 use super::Node;
 use crate::raft::raft_types::LogEntry;
-use crate::raft::state_persister::Persister;
 use crate::raft::state_machine::StorageEngine;
+use crate::raft::state_persister::Persister;
 
 impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     pub(super) fn last_log_index(&self) -> u64 {
@@ -12,6 +12,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         if index <= self.snapshot_last_index {
             None
         } else {
+            // Convert to 0-based index for the entries vector
             self.entries
                 .get((index - self.snapshot_last_index - 1) as usize)
         }
