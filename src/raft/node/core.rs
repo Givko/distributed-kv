@@ -3,7 +3,6 @@ use crate::raft::raft_types::{ChangeStateReply, LogEntry, RaftMsg};
 use crate::raft::state_machine::StateMachine;
 use crate::raft::state_machine::StorageEngine;
 use crate::raft::state_persister::{PersistentState, Persister};
-use crate::storage::entry;
 use rand::Rng;
 use std::{collections::HashMap, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -310,9 +309,7 @@ mod tests {
         saved_state: Arc<Mutex<Option<PersistentState>>>,
     }
 
-    struct MockWal {
-        path: PathBuf,
-    }
+    struct MockWal {}
 
     #[async_trait::async_trait]
     impl WalStorage for MockWal {
@@ -323,16 +320,11 @@ mod tests {
         async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
             Ok(vec![])
         }
-
-        fn path(&self) -> &PathBuf {
-            &self.path
-        }
     }
 
     /// A mock WAL that returns a fixed, pre-loaded set of entries from `read_all`.
     struct PreloadedMockWal {
         entries: Vec<WalEntry>,
-        path: PathBuf,
     }
 
     #[async_trait::async_trait]
@@ -344,19 +336,13 @@ mod tests {
         async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
             Ok(self.entries.clone())
         }
-
-        fn path(&self) -> &PathBuf {
-            &self.path
-        }
     }
 
     struct LSMTree;
 
     impl LSMTree {
         fn new() -> RealLSMTree {
-            RealLSMTree::with_wal(Box::new(MockWal {
-                path: PathBuf::from("mock-wal.log"),
-            }))
+            RealLSMTree::with_wal(Box::new(MockWal {}))
         }
     }
 
@@ -519,7 +505,6 @@ mod tests {
                 WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
                 WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
             ],
-            path: PathBuf::from("preloaded-mock-wal.log"),
         };
         let node = Node::new(
             vec![],
@@ -567,7 +552,6 @@ mod tests {
                 WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
                 WalEntry::set(3, b"key1".to_vec(), b"val3".to_vec()),
             ],
-            path: PathBuf::from("preloaded-mock-wal.log"),
         };
         let node = Node::new(
             vec![],
@@ -612,7 +596,6 @@ mod tests {
                 WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
                 WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
             ],
-            path: PathBuf::from("preloaded-mock-wal.log"),
         };
         let node = Node::new(
             vec![],
@@ -656,7 +639,6 @@ mod tests {
                 WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
                 WalEntry::set(2, b"key1".to_vec(), b"val2".to_vec()),
             ],
-            path: PathBuf::from("preloaded-mock-wal.log"),
         };
         let mut node = Node::new(
             vec![],
@@ -704,7 +686,6 @@ mod tests {
         // … but the WAL only recorded the first one before the crash.
         let wal = PreloadedMockWal {
             entries: vec![WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec())],
-            path: PathBuf::from("preloaded-mock-wal.log"),
         };
         let node = Node::new(
             vec![],

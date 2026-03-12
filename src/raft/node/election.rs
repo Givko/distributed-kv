@@ -1,8 +1,8 @@
 use super::{Node, State};
 use crate::raft::network_types::OutMsg;
 use crate::raft::raft_types::{RequestVoteData, RequestVoteReplyData};
-use crate::raft::state_persister::Persister;
 use crate::raft::state_machine::StorageEngine;
+use crate::raft::state_persister::Persister;
 
 impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     pub(super) async fn start_election(&mut self) -> anyhow::Result<()> {
@@ -156,11 +156,6 @@ mod tests {
 
         async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
             Ok(vec![])
-        }
-
-        fn path(&self) -> &PathBuf {
-            static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-            PATH.get_or_init(|| PathBuf::from("mock-wal.log"))
         }
     }
 
