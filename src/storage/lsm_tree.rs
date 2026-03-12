@@ -7,6 +7,8 @@ use crate::storage::sstable::{SSTableStorageManager, SSTablesStorage};
 use crate::storage::wal::{Wal, WalStorage};
 use std::path::PathBuf;
 
+const FLUSH_THRESHOLD_BYTES: usize = 1024 * 1024; // 1 MB
+
 pub struct LSMTree {
     memtable: Box<dyn MemTable + Sync + Send>,
     wal: Box<dyn WalStorage + Sync + Send>,
@@ -24,8 +26,7 @@ impl LSMTree {
     /// Creates an LSMTree whose WAL file is named `<sanitized_id>-wal.log`,
     /// where the node ID (e.g. `127.0.0.1:5051`) has `:` and `.` replaced by `_`.
     pub async fn with_node_id(id: &str) -> Self {
-        let sanitized = id.replace(['.', ':'], "_");
-        Self::with_wal(Box::new(Wal::new(PathBuf::from(format!("wal.log"))).await))
+        Self::with_wal(Box::new(Wal::new(PathBuf::from("wal.log")).await))
     }
 
     pub fn with_wal(wal: Box<dyn WalStorage + Sync + Send>) -> Self {
@@ -39,7 +40,7 @@ impl LSMTree {
         }
     }
 
-    async fn flush_to_sstable(&mut self) -> anyhow::Result<()> {
+    async fn flush(&mut self) -> anyhow::Result<()> {
         // rename old WAL as flushing to be able to locate it on recovery if flush fails
         let file_path = "wal.log";
         let tmp_file_path = format!("{}.tmp", file_path);
@@ -59,6 +60,11 @@ impl LSMTree {
         tokio::spawn(async move {
             if let Err(e) = SSTableStorageManager::flush(&old_entries).await {
                 eprintln!("Failed to flush memtable to SSTable: {e}");
+            }
+
+            // Clean up the flushing memtable and WAL after the flush is complete
+            if let Err(e) = tokio::fs::remove_file(&tmp_file_path).await {
+                eprintln!("Failed to delete flushing WAL file: {e}");
             }
         });
 
@@ -80,6 +86,23 @@ impl StorageEngine for LSMTree {
             .expect("Failed to write to WAL");
         self.last_raft_index = raft_index;
         self.memtable.set(raft_index, key, value);
+        if self.memtable.size_bytes() >= FLUSH_THRESHOLD_BYTES
+            && self.flushing_memtable.is_none()
+            && self.flushing_wal.is_none()
+            && let Err(e) = self.flush().await
+        {
+            eprintln!("Failed to flush memtable to SSTable: {e}");
+        }
+
+        if self.flushing_memtable.is_some()
+            && let Ok(exists) = tokio::fs::try_exists("wal.log.tml").await
+            && !exists
+        {
+            // if the flushing wal is missing it means flushing has completed successfully
+            // and we need to to clean the flushing memtable and wal references to avoid future lookups into them until the next flush
+            self.flushing_memtable.take();
+            self.flushing_wal.take();
+        }
     }
 
     async fn delete(&mut self, raft_index: u64, key: &[u8]) {
@@ -159,6 +182,11 @@ impl StorageEngine for LSMTree {
             if let Err(e) = SSTableStorageManager::flush(&old_entries).await {
                 eprintln!("Failed to flush memtable to SSTable: {e}");
             }
+
+            // Clean up the flushing memtable and WAL after the flush is complete
+            if let Err(e) = tokio::fs::remove_file("wal.log.tmp").await {
+                eprintln!("Failed to delete flushing WAL file: {e}");
+            }
         });
 
         Ok(())
@@ -184,19 +212,13 @@ mod tests {
     #[derive(Default, Clone)]
     struct RecordingWal {
         entries: Arc<Mutex<Vec<WalEntry>>>,
-        path: PathBuf,
     }
 
     impl RecordingWal {
         fn new() -> Self {
             Self {
                 entries: Arc::new(Mutex::new(Vec::new())),
-                path: PathBuf::from("recording-wal.log"),
             }
-        }
-
-        fn recorded(&self) -> Vec<WalEntry> {
-            self.entries.lock().unwrap().clone()
         }
     }
 
@@ -386,7 +408,7 @@ mod tests {
             WalEntry::set(2, b"k2".to_vec(), b"v2".to_vec()),
         ]);
         let mut tree = LSMTree::with_wal(Box::new(wal));
-        tree.recover().await;
+        _ = tree.recover().await;
         assert_eq!(
             tree.get(b"k1").await,
             Some(MemTableEntry::Value {
@@ -411,7 +433,7 @@ mod tests {
             WalEntry::delete(2, b"k".to_vec()),
         ]);
         let mut tree = LSMTree::with_wal(Box::new(wal));
-        tree.recover().await;
+        _ = tree.recover().await;
         // After recovery the key carries a tombstone, not a value and not absent.
         assert_eq!(
             tree.get(b"k").await,
@@ -428,7 +450,7 @@ mod tests {
             WalEntry::delete(4, b"k".to_vec()), // non-contiguous raft index
         ]);
         let mut tree = LSMTree::with_wal(Box::new(wal));
-        tree.recover().await;
+        _ = tree.recover().await;
         assert_eq!(
             tree.get(b"k").await,
             Some(MemTableEntry::Tombstone { logical_index: 4 })
@@ -443,7 +465,7 @@ mod tests {
             WalEntry::set(2, b"k".to_vec(), b"v2".to_vec()),
         ]);
         let mut tree = LSMTree::with_wal(Box::new(wal));
-        tree.recover().await;
+        _ = tree.recover().await;
         assert_eq!(
             tree.get(b"k").await,
             Some(MemTableEntry::Value {
@@ -462,7 +484,7 @@ mod tests {
             WalEntry::set(3, b"k".to_vec(), b"v2".to_vec()),
         ]);
         let mut tree = LSMTree::with_wal(Box::new(wal));
-        tree.recover().await;
+        _ = tree.recover().await;
         assert_eq!(
             tree.get(b"k").await,
             Some(MemTableEntry::Value {
@@ -475,7 +497,7 @@ mod tests {
     #[tokio::test]
     async fn test_recover_empty_wal_leaves_tree_empty() {
         let mut tree = make_tree();
-        tree.recover().await;
+        _ = tree.recover().await;
         assert_eq!(tree.get(b"k").await, None); // truly absent → None
     }
 
@@ -537,7 +559,7 @@ mod tests {
             WalEntry::delete(3, b"k1".to_vec()),
         ]);
         let mut tree = LSMTree::with_wal(Box::new(wal));
-        tree.recover().await;
+        _ = tree.recover().await;
 
         tree.set(4, b"k3".to_vec(), b"v3".to_vec()).await;
         assert_eq!(
@@ -568,7 +590,7 @@ mod tests {
         ]);
         let spy = Arc::clone(&wal.entries);
         let mut tree = LSMTree::with_wal(Box::new(wal));
-        tree.recover().await;
+        _ = tree.recover().await;
 
         tree.set(3, b"k3".to_vec(), b"v3".to_vec()).await;
         tree.delete(4, b"k1").await;
@@ -621,7 +643,7 @@ mod tests {
             WalEntry::delete(3, b"k1".to_vec()),
         ]);
         let mut tree = LSMTree::with_wal(Box::new(wal));
-        tree.recover().await;
+        _ = tree.recover().await;
         // Last WAL entry has raft index 3 → last_applied_index = 3.
         assert_eq!(tree.last_applied_index(), 3);
     }
@@ -629,7 +651,7 @@ mod tests {
     #[tokio::test]
     async fn test_last_applied_index_zero_after_recover_from_empty_wal() {
         let mut tree = make_tree();
-        tree.recover().await;
+        _ = tree.recover().await;
         assert_eq!(tree.last_applied_index(), 0);
     }
 }
