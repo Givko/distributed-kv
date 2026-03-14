@@ -6,8 +6,11 @@ use crate::storage::memtable::{BTreeMapMemTable, MemTable, MemTableEntry};
 use crate::storage::sstable::{SSTableStorageManager, SSTablesStorage};
 use crate::storage::wal::{Wal, WalStorage};
 use std::path::PathBuf;
+use tokio::sync::oneshot::error::TryRecvError;
 
 const FLUSH_THRESHOLD_BYTES: usize = 1024 * 1024; // 1 MB
+const FLUSH_WAL_PATH: &str = "wal.log.tmp";
+const WALL_FILE_PATH: &str = "wal.log";
 
 pub struct LSMTree {
     memtable: Box<dyn MemTable + Sync + Send>,
@@ -15,16 +18,11 @@ pub struct LSMTree {
 
     flushing_memtable: Option<Box<dyn MemTable + Sync + Send>>,
     flushing_wal: Option<Box<dyn WalStorage + Sync + Send>>,
+    flush_finished: Option<tokio::sync::oneshot::Receiver<bool>>,
 }
 
 impl LSMTree {
     pub async fn new() -> Self {
-        Self::with_wal(Box::new(Wal::new(PathBuf::from("wal.log")).await))
-    }
-
-    /// Creates an LSMTree whose WAL file is named `<sanitized_id>-wal.log`,
-    /// where the node ID (e.g. `127.0.0.1:5051`) has `:` and `.` replaced by `_`.
-    pub async fn with_node_id(id: &str) -> Self {
         Self::with_wal(Box::new(Wal::new(PathBuf::from("wal.log")).await))
     }
 
@@ -35,15 +33,16 @@ impl LSMTree {
 
             flushing_memtable: None,
             flushing_wal: None,
+            flush_finished: None,
         }
     }
 
     async fn flush(&mut self) -> anyhow::Result<()> {
         // rename old WAL as flushing to be able to locate it on recovery if flush fails
-        let file_path = "wal.log";
-        let tmp_file_path = format!("{}.tmp", file_path);
+        let file_path = WALL_FILE_PATH;
+        let tmp_file_path = FLUSH_WAL_PATH;
 
-        tokio::fs::rename(file_path, &tmp_file_path).await?;
+        tokio::fs::rename(file_path, tmp_file_path).await?;
         //Save old memtable and wal for recovery if flush fails
         let new_wal_path = PathBuf::from(file_path);
         let new_wal = Box::new(Wal::new(new_wal_path).await); // Start a new WAL file for the new memtable
@@ -55,25 +54,84 @@ impl LSMTree {
         self.flushing_wal = Some(std::mem::replace(&mut self.wal, new_wal));
 
         let old_entries = self.flushing_memtable.as_ref().unwrap().to_entries();
+        let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
+        self.flush_finished = Some(rcv);
+        self.spawn_flush_task(snd, old_entries, tmp_file_path.to_string())
+            .await;
+        Ok(())
+    }
+
+    async fn spawn_flush_task(
+        &mut self,
+        notification_channel: tokio::sync::oneshot::Sender<bool>,
+        old_entries: Vec<Entry>,
+        tmp_file_path: String,
+    ) {
         tokio::spawn(async move {
             if let Err(e) = SSTableStorageManager::flush(&old_entries).await {
                 eprintln!("Failed to flush memtable to SSTable: {e}");
+                notification_channel
+                    .send(false)
+                    .expect("Failed to send flush completion signal");
+                return;
             }
 
             // Clean up the flushing memtable and WAL after the flush is complete
             if let Err(e) = tokio::fs::remove_file(&tmp_file_path).await {
                 eprintln!("Failed to delete flushing WAL file: {e}");
-            }
-        });
+                notification_channel
+                    .send(false)
+                    .expect("Failed to send flush completion signal");
 
-        Ok(())
+                return;
+            }
+
+            notification_channel
+                .send(true)
+                .expect("Failed to send flush completion signal");
+        });
+    }
+
+    async fn clean_flush_state(&mut self) {
+        let Some(rcv) = &mut self.flush_finished else {
+            return;
+        };
+
+        match rcv.try_recv() {
+            Ok(success) => {
+                self.flush_finished.take(); // Clear the receiver after handling the result
+                if success {
+                    // Flush succeeded, clean up flushing memtable and WAL
+                    self.flushing_memtable.take();
+                    self.flushing_wal.take();
+                } else {
+                    eprintln!("Flush task reported failure");
+
+                    // If flush fails we should try indefinitely until it succeeds to avoid data loss
+                    self.flush()
+                        .await
+                        .expect("Failed to start new flush after previous flush failure");
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                // Flush is still in progress, do nothing for now
+            }
+            Err(TryRecvError::Closed) => {
+                eprintln!("Failed to receive flush completion signal: channel closed");
+                self.flush_finished.take(); // Clear the receiver on error to avoid future attempts
+            }
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl StorageEngine for LSMTree {
-    async fn get(&self, key: &[u8]) -> Option<MemTableEntry> {
-        self.memtable.get(key).cloned()
+    async fn get(&mut self, key: &[u8]) -> Option<MemTableEntry> {
+        self.clean_flush_state().await; // Check if any flush has completed and clean up state accordingly before processing the get
+        self.memtable
+            .get(key)
+            .cloned()
+            .or_else(|| self.flushing_memtable.as_ref()?.get(key).cloned())
     }
 
     async fn set(&mut self, raft_index: u64, key: Vec<u8>, value: Vec<u8>) {
@@ -83,22 +141,9 @@ impl StorageEngine for LSMTree {
             .await
             .expect("Failed to write to WAL");
         self.memtable.set(raft_index, key, value);
-        if self.memtable.size_bytes() >= FLUSH_THRESHOLD_BYTES
-            && self.flushing_memtable.is_none()
-            && self.flushing_wal.is_none()
-            && let Err(e) = self.flush().await
-        {
-            eprintln!("Failed to flush memtable to SSTable: {e}");
-        }
-
-        if self.flushing_memtable.is_some()
-            && let Ok(exists) = tokio::fs::try_exists("wal.log.tmp").await
-            && !exists
-        {
-            // if the flushing wal is missing it means flushing has completed successfully
-            // and we need to to clean the flushing memtable and wal references to avoid future lookups into them until the next flush
-            self.flushing_memtable.take();
-            self.flushing_wal.take();
+        self.clean_flush_state().await; // Check if any flush has completed and clean up state accordingly after processing the set
+        if self.memtable.size_in_bytes() >= FLUSH_THRESHOLD_BYTES && self.flush_finished.is_none() {
+            self.flush().await.expect("Failed to flush memtable");
         }
     }
 
@@ -108,7 +153,11 @@ impl StorageEngine for LSMTree {
             .append(&delete_entry)
             .await
             .expect("Failed to write to WAL");
-        self.memtable.delete(raft_index, key)
+        self.memtable.delete(raft_index, key);
+        self.clean_flush_state().await; // Check if any flush has completed and clean up state accordingly after processing the set
+        if self.memtable.size_in_bytes() >= FLUSH_THRESHOLD_BYTES && self.flush_finished.is_none() {
+            self.flush().await.expect("Failed to flush memtable");
+        }
     }
 
     async fn recover(&mut self) -> anyhow::Result<()> {
@@ -125,7 +174,7 @@ impl StorageEngine for LSMTree {
         // try and open the flushing WAL if it exists and replay it as well,
         //since the flush might have failed after WAL rotation but before
         //the old WAL was deleted
-        let file_result = OpenOptions::new().read(true).open("wal.log.tmp").await;
+        let file_result = OpenOptions::new().read(true).open(FLUSH_WAL_PATH).await;
         let flush_wal = match file_result {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -136,12 +185,22 @@ impl StorageEngine for LSMTree {
                 return Err(anyhow::anyhow!(e));
             }
         };
+
         let flushing_wal = Box::new(Wal::from_file(flush_wal));
         self.flushing_wal = Some(flushing_wal);
         self.flushing_memtable = Some(Box::new(BTreeMapMemTable::new())); // Start with a fresh memtable for the new WAL
-        match self.flushing_wal.as_mut().unwrap().read_all().await {
+        match self
+            .flushing_wal
+            .as_mut()
+            .expect("Flushing WAL should exist")
+            .read_all()
+            .await
+        {
             Ok(entries) => {
-                self.flushing_memtable.as_mut().unwrap().extend(entries);
+                self.flushing_memtable
+                    .as_mut()
+                    .expect("Flushing memtable should exist")
+                    .extend(entries);
             }
             Err(e) => {
                 eprintln!("Failed to read flushing WAL during recovery: {e}");
@@ -149,18 +208,15 @@ impl StorageEngine for LSMTree {
             }
         }
 
-        let old_entries = self.flushing_memtable.as_ref().unwrap().to_entries();
-        tokio::spawn(async move {
-            if let Err(e) = SSTableStorageManager::flush(&old_entries).await {
-                eprintln!("Failed to flush memtable to SSTable: {e}");
-            }
-
-            // Clean up the flushing memtable and WAL after the flush is complete
-            if let Err(e) = tokio::fs::remove_file("wal.log.tmp").await {
-                eprintln!("Failed to delete flushing WAL file: {e}");
-            }
-        });
-
+        let old_entries = self
+            .flushing_memtable
+            .as_ref()
+            .expect("Flushing memtable should exist")
+            .to_entries();
+        let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
+        self.spawn_flush_task(snd, old_entries, FLUSH_WAL_PATH.to_string())
+            .await;
+        self.flush_finished = Some(rcv);
         Ok(())
     }
 }
@@ -223,7 +279,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_missing_key_returns_none() {
-        let tree = make_tree();
+        let mut tree = make_tree();
         assert_eq!(tree.get(b"missing").await, None); // truly absent → None
     }
 
