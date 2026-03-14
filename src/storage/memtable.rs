@@ -19,7 +19,7 @@ pub trait MemTable {
     fn to_entries(&self) -> Vec<Entry>; // ordered snapshot for flushing — owns the flush conversion logic
     fn clear(&mut self);
     fn is_empty(&self) -> bool;
-    fn size_bytes(&self) -> usize; // used to decide when to trigger a flush
+    fn size_in_bytes(&self) -> usize; // used to decide when to trigger a flush
     fn extend(&mut self, entries: Vec<Entry>);
 }
 
@@ -98,7 +98,7 @@ impl MemTable for BTreeMapMemTable {
         self.map.is_empty()
     }
 
-    fn size_bytes(&self) -> usize {
+    fn size_in_bytes(&self) -> usize {
         self.cur_size_bytes
     }
 
@@ -120,10 +120,10 @@ mod tests {
     #[test]
     fn size_bytes_grows_with_each_entry() {
         let mut table = BTreeMapMemTable::new();
-        let empty_size = table.size_bytes();
+        let empty_size = table.size_in_bytes();
 
         table.set(1, b"key1".to_vec(), b"value1".to_vec());
-        let one_entry_size = table.size_bytes();
+        let one_entry_size = table.size_in_bytes();
         let expected_size = empty_size
             + BTreeMapMemTable::entry_size(
                 b"key1",
@@ -139,7 +139,7 @@ mod tests {
         );
 
         table.set(2, b"key2".to_vec(), b"value2".to_vec());
-        let two_entries_size = table.size_bytes();
+        let two_entries_size = table.size_in_bytes();
         let expected_size = expected_size
             + BTreeMapMemTable::entry_size(
                 b"key2",
@@ -160,7 +160,7 @@ mod tests {
         let mut table = BTreeMapMemTable::new();
 
         table.set(1, b"key".to_vec(), b"small".to_vec());
-        let after_first = table.size_bytes();
+        let after_first = table.size_in_bytes();
 
         // overwrite with a larger value — size should grow by the diff
         table.set(2, b"key".to_vec(), b"a_much_larger_value".to_vec());
@@ -172,12 +172,12 @@ mod tests {
             },
         );
         assert_eq!(
-            table.size_bytes(),
+            table.size_in_bytes(),
             expected_after_overwrite,
             "size should reflect the new larger value"
         );
         assert!(
-            table.size_bytes() > after_first,
+            table.size_in_bytes() > after_first,
             "overwriting with a larger value should increase size"
         );
 
@@ -191,12 +191,12 @@ mod tests {
             },
         );
         assert_eq!(
-            table.size_bytes(),
+            table.size_in_bytes(),
             expected_after_shrink,
             "size should reflect the new smaller value"
         );
         assert!(
-            table.size_bytes() < after_first,
+            table.size_in_bytes() < after_first,
             "overwriting with a smaller value should decrease size"
         );
     }
@@ -208,12 +208,12 @@ mod tests {
         table.set(1, b"key1".to_vec(), b"value1".to_vec());
         table.set(2, b"key2".to_vec(), b"value2".to_vec());
         assert!(
-            table.size_bytes() > 0,
+            table.size_in_bytes() > 0,
             "size should be non-zero before clear"
         );
 
         table.clear();
-        assert_eq!(table.size_bytes(), 0, "size should be zero after clear");
+        assert_eq!(table.size_in_bytes(), 0, "size should be zero after clear");
     }
 
     #[test]
@@ -221,19 +221,19 @@ mod tests {
         let mut table = BTreeMapMemTable::new();
 
         table.set(1, b"key".to_vec(), b"some_value".to_vec());
-        let after_set = table.size_bytes();
+        let after_set = table.size_in_bytes();
 
         // replace with a tombstone — key stays the same, value bytes disappear
         table.delete(2, b"key");
         let expected_after_delete =
             BTreeMapMemTable::entry_size(b"key", &MemTableEntry::Tombstone { logical_index: 2 });
         assert_eq!(
-            table.size_bytes(),
+            table.size_in_bytes(),
             expected_after_delete,
             "size should reflect tombstone entry"
         );
         assert!(
-            table.size_bytes() < after_set,
+            table.size_in_bytes() < after_set,
             "tombstone should be smaller than a value entry"
         );
     }

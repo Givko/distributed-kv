@@ -8,7 +8,7 @@ pub trait StorageEngine {
 
     /// Returns `None` if the key has never been set, `Some(Entry::Value(_))` if
     /// it exists, or `Some(Entry::Tombstone)` if it was deleted.
-    async fn get(&self, key: &[u8]) -> Option<MemTableEntry>;
+    async fn get(&mut self, key: &[u8]) -> Option<MemTableEntry>;
 
     async fn recover(&mut self) -> anyhow::Result<()>;
 }
@@ -57,7 +57,7 @@ impl<SM: StorageEngine> StateMachine<SM> {
         }
     }
 
-    pub async fn get(&self, key: &str) -> Option<String> {
+    pub async fn get(&mut self, key: &str) -> Option<String> {
         match self.engine.get(key.as_bytes()).await {
             Some(MemTableEntry::Value {
                 logical_index: _,
@@ -88,7 +88,7 @@ mod tests {
             self.data.remove(key);
         }
 
-        async fn get(&self, key: &[u8]) -> Option<MemTableEntry> {
+        async fn get(&mut self, key: &[u8]) -> Option<MemTableEntry> {
             self.data.get(key).map(|v| MemTableEntry::Value {
                 logical_index: 0,
                 value: v.clone(),
