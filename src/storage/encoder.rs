@@ -67,28 +67,52 @@ impl Encoder {
     }
 
     pub fn encode(entry: &Entry) -> Vec<u8> {
-        let mut body = Vec::new();
-        let key_len = entry.key.len() as u32;
-        let value_len = entry.value.len() as u32;
-
-        body.extend_from_slice(&entry.index.to_be_bytes());
-        body.push(entry.op);
-        body.extend_from_slice(&key_len.to_be_bytes());
-        body.extend_from_slice(&entry.key);
-        body.extend_from_slice(&value_len.to_be_bytes());
-        body.extend_from_slice(&entry.value);
-
-        let mut encoded = Vec::with_capacity(4 + body.len());
-        let len = body.len() as u32;
-        encoded.extend_from_slice(&len.to_be_bytes());
-        encoded.extend_from_slice(&body);
+        let mut encoded =
+            Vec::with_capacity(4 + 8 + 1 + 4 + entry.key.len() + 4 + entry.value.len());
+        Self::encode_internal(entry, &mut encoded);
         encoded
     }
+
+    fn encode_internal(entry: &Entry, bytes: &mut Vec<u8>) {
+        let key_len = entry.key.len() as u32;
+        let value_len = entry.value.len() as u32;
+        let index = entry.index.to_be_bytes();
+        let op = &entry.op;
+        let key_len_bytes = key_len.to_be_bytes();
+        let key = &entry.key;
+        let value_len_bytes = value_len.to_be_bytes();
+        let value = &entry.value;
+        let len: u32 = 8 + 1 + 4 + key_len + 4 + value_len;
+
+        bytes.extend_from_slice(&len.to_be_bytes());
+        bytes.extend_from_slice(&index);
+        bytes.push(*op);
+        bytes.extend_from_slice(&key_len_bytes);
+        bytes.extend_from_slice(key);
+        bytes.extend_from_slice(&value_len_bytes);
+        bytes.extend_from_slice(value);
+    }
+
+    pub fn encode_all(entries: &[Entry]) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        for entry in entries {
+            Self::encode_internal(entry, &mut encoded);
+        }
+        encoded
+    }
+
     pub fn decode_all(data: &[u8]) -> io::Result<Vec<Entry>> {
         let mut entries = Vec::new();
         let mut cursor = 0;
-        while cursor + 4 <= data.len() {
+        while cursor < data.len() {
             // Read the record length prefix
+            if cursor + 4 > data.len() {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Corrupted WAL entry: missing length prefix",
+                ));
+            }
+
             let len = u32::from_be_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
             cursor += 4;
             if cursor + len > data.len() {

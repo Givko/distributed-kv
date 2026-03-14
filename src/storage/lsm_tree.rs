@@ -119,6 +119,8 @@ impl LSMTree {
             Err(TryRecvError::Closed) => {
                 eprintln!("Failed to receive flush completion signal: channel closed");
                 self.flush_finished.take(); // Clear the receiver on error to avoid future attempts
+                self.flushing_memtable.take();
+                self.flushing_wal.take();
             }
         }
     }
