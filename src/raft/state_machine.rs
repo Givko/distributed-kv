@@ -184,7 +184,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_missing_key_returns_none() {
-        let sm = make_sm();
+        let mut sm = make_sm();
         assert_eq!(sm.get("missing").await, None);
     }
 }
