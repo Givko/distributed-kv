@@ -529,7 +529,7 @@ mod tests {
                 WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
             ],
         };
-        let node = Node::new(
+        let mut node = Node::new(
             vec![],
             network_inbox,
             "node1".to_string(),
@@ -580,7 +580,7 @@ mod tests {
                 WalEntry::set(3, b"key1".to_vec(), b"val3".to_vec()),
             ],
         };
-        let node = Node::new(
+        let mut node = Node::new(
             vec![],
             network_inbox,
             "node1".to_string(),
@@ -628,7 +628,7 @@ mod tests {
                 WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
             ],
         };
-        let node = Node::new(
+        let mut node = Node::new(
             vec![],
             network_inbox,
             "node1".to_string(),
@@ -722,7 +722,7 @@ mod tests {
         let wal = PreloadedMockWal {
             entries: vec![WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec())],
         };
-        let node = Node::new(
+        let mut node = Node::new(
             vec![],
             network_inbox,
             "node1".to_string(),

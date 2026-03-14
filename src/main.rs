@@ -7,13 +7,13 @@ use distributed_kv::raft::proto::{
 use tokio::sync::mpsc::Sender;
 use tonic::{Request, Response, Status, transport::Server};
 
-use distributed_kv::raft::network_types::OutMsg;
 use distributed_kv::LsmTreeNode;
+use distributed_kv::raft::network_sender::network_worker;
+use distributed_kv::raft::network_types::OutMsg;
 use distributed_kv::raft::raft_types::{
     AppendEntriesData, AppendEntriesReplyData, ChangeStateReply, LogEntry, RaftMsg,
     RequestVoteData, RequestVoteReplyData,
 };
-use distributed_kv::raft::network_sender::network_worker;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -159,8 +159,9 @@ async fn main() -> anyhow::Result<()> {
     let mailbox_clone = mailbox_snd.clone();
     _ = tokio::spawn(async move { network_worker(outbox_rcv, mailbox_clone).await });
 
-    let persister = distributed_kv::raft::state_persister::FilePersistentStorage::new(args.id.clone());
-    let storage_engine = distributed_kv::storage::lsm_tree::LSMTree::with_node_id(&args.id).await;
+    let persister =
+        distributed_kv::raft::state_persister::FilePersistentStorage::new(args.id.clone());
+    let storage_engine = distributed_kv::storage::lsm_tree::LSMTree::new().await;
     let node = LsmTreeNode::new(args.nodes, outbox_snd, args.id, persister, storage_engine).await?;
     _ = tokio::spawn(async move { node.run(mailbox_rcv).await });
 
