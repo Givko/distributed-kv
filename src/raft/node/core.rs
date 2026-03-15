@@ -224,6 +224,24 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                         self.network_inbox.send(append_entries).await?;
                     }
 
+                    for log_index in self.commit_index + 1..=self.last_log_index() {
+                        let mut count = 1; // self
+                        for (_, value) in self.match_index.iter() {
+                            if *value >= log_index {
+                                count += 1;
+                            }
+                        }
+
+                        if self.is_majority(count)
+                            && self.get_log_entry(log_index).map_or(0, |e| e.term)
+                                == self.current_term
+                        {
+                            self.commit_index = log_index;
+                        }
+                    }
+
+                    self.persist_state().await?;
+
                     let log_index = self.last_log_index();
                     if let Some(reply_channel) = reply_channel {
                         self.pending_clients.insert(log_index, reply_channel);
