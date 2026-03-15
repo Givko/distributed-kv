@@ -23,6 +23,30 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             .map_or(self.snapshot_last_term, |e| e.term);
 
         self.persist_state().await?;
+        let votes = match self.state {
+            State::Candidate { votes } => votes,
+            _ => {
+                eprintln!("Unexpected state when starting election, expected Candidate");
+                return Ok(());
+            }
+        };
+
+        if self.is_majority(votes) {
+            eprintln!(
+                "Received majority votes, becoming leader with term {}",
+                self.current_term
+            );
+
+            let next_index = self.last_log_index() + 1;
+            for peer in &self.peers {
+                self.next_index.insert(peer.clone(), next_index);
+                self.match_index.insert(peer.clone(), 0);
+            }
+
+            self.state = State::Leader;
+            return Ok(());
+        }
+
         for peer in peers {
             eprintln!("Sending requestVote to {}", peer);
             let out_msg = OutMsg::RequestVote {
@@ -71,6 +95,12 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             });
         }
 
+        if self.voted_for.is_some() && voted_for_candidate {
+            return Ok(RequestVoteReplyData {
+                term: self.current_term,
+                vote: true,
+            });
+        }
         self.voted_for = Some(vote_request.candidate.clone());
         self.state = State::Follower;
         self.persist_state().await?;
