@@ -306,7 +306,6 @@ mod tests {
     use crate::storage::lsm_tree::LSMTree as RealLSMTree;
     use crate::storage::wal::WalStorage;
     use std::io;
-    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     struct TestPersister;
@@ -350,8 +349,9 @@ mod tests {
     struct LSMTree;
 
     impl LSMTree {
-        fn new() -> RealLSMTree {
-            RealLSMTree::with_wal(Box::new(MockWal {}))
+        async fn new() -> RealLSMTree {
+            let wal = Box::new(MockWal {});
+            RealLSMTree::with_wal(wal).await
         }
     }
 
@@ -465,7 +465,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             persister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         assert_eq!(node.current_term, 7);
@@ -489,7 +489,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             FailingLoadPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await;
         assert!(result.is_err());
@@ -534,7 +534,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             persister,
-            RealLSMTree::with_wal(Box::new(wal)),
+            RealLSMTree::with_wal(Box::new(wal)).await,
         )
         .await?;
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
@@ -585,7 +585,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             persister,
-            RealLSMTree::with_wal(Box::new(wal)),
+            RealLSMTree::with_wal(Box::new(wal)).await,
         )
         .await?;
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val3");
@@ -633,7 +633,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             persister,
-            RealLSMTree::with_wal(Box::new(wal)),
+            RealLSMTree::with_wal(Box::new(wal)).await,
         )
         .await?;
         // last_applied must come from the WAL (highest raft index = 2).
@@ -678,7 +678,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             persister,
-            RealLSMTree::with_wal(Box::new(wal)),
+            RealLSMTree::with_wal(Box::new(wal)).await,
         )
         .await?;
         assert_eq!(node.last_applied, 2);
@@ -727,7 +727,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             persister,
-            RealLSMTree::with_wal(Box::new(wal)),
+            RealLSMTree::with_wal(Box::new(wal)).await,
         )
         .await?;
         // last_applied reflects WAL state only — the gap entry was not applied.
@@ -753,7 +753,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             persister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.state = State::Leader;
@@ -779,7 +779,7 @@ mod tests {
             network_inbox,
             "self".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 1;
@@ -828,7 +828,7 @@ mod tests {
             network_inbox,
             "self".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 1;
@@ -882,7 +882,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
 
@@ -915,7 +915,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
 
@@ -944,7 +944,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
 
@@ -969,7 +969,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
 

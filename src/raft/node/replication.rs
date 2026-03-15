@@ -222,8 +222,8 @@ mod tests {
     struct LSMTree;
 
     impl LSMTree {
-        fn new() -> RealLSMTree {
-            RealLSMTree::with_wal(Box::new(MockWal))
+        async fn new() -> RealLSMTree {
+            RealLSMTree::with_wal(Box::new(MockWal)).await
         }
     }
 
@@ -256,7 +256,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 4;
@@ -291,7 +291,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 4;
@@ -324,7 +324,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 1;
@@ -353,7 +353,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 1;
@@ -382,7 +382,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 2;
@@ -411,7 +411,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 2;
@@ -440,7 +440,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 2;
@@ -473,7 +473,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 2;
@@ -511,7 +511,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 2;
@@ -554,7 +554,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 2;
@@ -591,7 +591,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 2;
@@ -629,7 +629,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 2;
@@ -671,7 +671,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 1;
@@ -696,7 +696,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 2;
@@ -724,7 +724,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 2;
@@ -765,7 +765,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 2;
@@ -806,7 +806,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new(),
+            LSMTree::new().await,
         )
         .await?;
         node.current_term = 2;
