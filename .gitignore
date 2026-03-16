@@ -23,6 +23,11 @@ target
 # Ignore local WAL and state files
 *wal.log
 *state.json
+sstable_*.dat
+sstable_*.dat.idx
+metadata.dat
+metadata.dat.tmp
+
 
 # Ignore VS Code settings
 .vscode/

@@ -87,16 +87,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         // before applying any committed entries to ensure the state machine is up to date
         // with the latest persisted state
         node.state_machine.recover().await?;
-        eprintln!(
-            "Node {} initialized with term {}, voted_for {:?}, commit_index {}, last_applied {}, snapshot_last_index {}, snapshot_last_term {}",
-            node.id,
-            node.current_term,
-            node.voted_for,
-            node.commit_index,
-            node.last_applied,
-            node.snapshot_last_index,
-            node.snapshot_last_term
-        );
         Ok(node)
     }
 
@@ -224,23 +214,9 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                         self.network_inbox.send(append_entries).await?;
                     }
 
-                    for log_index in self.commit_index + 1..=self.last_log_index() {
-                        let mut count = 1; // self
-                        for (_, value) in self.match_index.iter() {
-                            if *value >= log_index {
-                                count += 1;
-                            }
-                        }
-
-                        if self.is_majority(count)
-                            && self.get_log_entry(log_index).map_or(0, |e| e.term)
-                                == self.current_term
-                        {
-                            self.commit_index = log_index;
-                        }
-                    }
-
-                    self.persist_state().await?;
+                    // this is required for sinle node clusters
+                    // as it will have mojority of 1 and can commit immediately
+                    self.move_commit_index().await?;
 
                     let log_index = self.last_log_index();
                     if let Some(reply_channel) = reply_channel {
@@ -294,6 +270,26 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         //ideally we should do this on each command, but for simplicity we will just do it after applying all committed commands
         self.persist_state().await?;
 
+        Ok(())
+    }
+
+    pub(super) async fn move_commit_index(&mut self) -> anyhow::Result<()> {
+        for log_index in self.commit_index + 1..=self.last_log_index() {
+            let mut count = 1; // self
+            for (_, value) in self.match_index.iter() {
+                if *value >= log_index {
+                    count += 1;
+                }
+            }
+
+            if self.is_majority(count)
+                && self.get_log_entry(log_index).map_or(0, |e| e.term) == self.current_term
+            {
+                self.commit_index = log_index;
+            }
+        }
+
+        self.persist_state().await?;
         Ok(())
     }
 

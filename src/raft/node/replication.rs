@@ -112,22 +112,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             self.match_index
                 .insert(append_entries_reply_data.peer.clone(), match_index);
 
-            for log_index in self.commit_index + 1..=self.last_log_index() {
-                let mut count = 1; // self
-                for (_, value) in self.match_index.iter() {
-                    if *value >= log_index {
-                        count += 1;
-                    }
-                }
-
-                if self.is_majority(count)
-                    && self.get_log_entry(log_index).map_or(0, |e| e.term) == self.current_term
-                {
-                    self.commit_index = log_index;
-                }
-            }
-
-            self.persist_state().await?;
+            self.move_commit_index().await?;
             return Ok(());
         }
 

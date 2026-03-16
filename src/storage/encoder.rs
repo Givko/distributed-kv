@@ -69,11 +69,12 @@ impl Encoder {
     pub fn encode(entry: &Entry) -> Vec<u8> {
         let mut encoded =
             Vec::with_capacity(4 + 8 + 1 + 4 + entry.key.len() + 4 + entry.value.len());
-        Self::encode_internal(entry, &mut encoded);
+        Self::encode_into(entry, &mut encoded);
         encoded
     }
 
-    fn encode_internal(entry: &Entry, bytes: &mut Vec<u8>) {
+    // Returns the number of bytes written
+    pub(super) fn encode_into(entry: &Entry, bytes: &mut Vec<u8>) -> u32 {
         let key_len = entry.key.len() as u32;
         let value_len = entry.value.len() as u32;
         let index = entry.index.to_be_bytes();
@@ -91,14 +92,7 @@ impl Encoder {
         bytes.extend_from_slice(key);
         bytes.extend_from_slice(&value_len_bytes);
         bytes.extend_from_slice(value);
-    }
-
-    pub fn encode_all(entries: &[Entry]) -> Vec<u8> {
-        let mut encoded = Vec::new();
-        for entry in entries {
-            Self::encode_internal(entry, &mut encoded);
-        }
-        encoded
+        len
     }
 
     pub fn decode_all(data: &[u8]) -> io::Result<Vec<Entry>> {
