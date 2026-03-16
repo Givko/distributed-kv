@@ -21,7 +21,7 @@ The goal is to understand distributed systems and storage engine internals by im
 | SSTable flush + read path | 🔄 In Progress |
 | Bloom filters | Planned |
 | Size-tiered compaction | Planned |
-| Raft ↔ LSM integration | Planned |
+| Raft ↔ LSM integration | ✅ Complete |
 | RESP wire protocol | Planned |
 
 ## Architecture
