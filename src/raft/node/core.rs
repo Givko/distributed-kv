@@ -245,6 +245,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         }
 
         let range = self.last_applied + 1..=self.commit_index;
+        let mut last_applied_term = self.snapshot_last_term;
         for i in range {
             let entry = self
                 .get_log_entry(i)
@@ -253,11 +254,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             let command = entry.command.clone();
 
             self.state_machine.apply(i, command).await?;
-            self.last_applied = i;
-            self.entries
-                .remove((i - self.snapshot_last_index) as usize - 1);
-            self.snapshot_last_index = i;
-            self.snapshot_last_term = entry.term;
+            last_applied_term = entry.term;
 
             let reply_channel = self.pending_clients.remove(&i);
             let reply = ChangeStateReply {
@@ -267,7 +264,12 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             self.send_to_reply_channel(reply_channel, reply)?;
         }
 
-        //ideally we should do this on each command, but for simplicity we will just do it after applying all committed commands
+        let entries_applied = (self.commit_index - self.snapshot_last_index) as usize;
+        self.entries.drain(..entries_applied);
+        self.last_applied = self.commit_index;
+        self.snapshot_last_index = self.commit_index;
+        self.snapshot_last_term = last_applied_term;
+
         self.persist_state().await?;
 
         Ok(())
