@@ -22,7 +22,8 @@ This is purely a learning project. The goal is to understand distributed systems
 | Snapshot boundary tracking | ✅ Complete |
 | InstallSnapshot RPC | Planned |
 | LSM MemTable + WAL | ✅ Complete |
-| SSTable flush + read path | 🔄 In Progress |
+| SSTable flush | ✅ Complete |
+| SSTable read path | 🔄 In Progress |
 | Bloom filters | Planned |
 | Size-tiered compaction | Planned |
 | Raft ↔ LSM integration | ✅ Complete |
@@ -30,7 +31,7 @@ This is purely a learning project. The goal is to understand distributed systems
 
 ## Architecture
 
-Current state machine: `BTreeMap`-backed LSM tree with a Write-Ahead Log. Planned: SSTable flush, bloom filters, and size-tiered compaction.
+Current state machine: `BTreeMap`-backed LSM tree with a Write-Ahead Log and SSTable flush. Planned: SSTable read path integration, bloom filters, and size-tiered compaction.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -145,7 +146,9 @@ src/
 │   ├── entry.rs              # WAL/SSTable entry type (op, key, value, index)
 │   ├── encoder.rs            # Binary codec: encode/decode WAL records
 │   ├── wal.rs                # WalStorage trait + file-backed Wal implementation
-│   └── lsm_tree.rs           # LSMTree: MemTable (BTreeMap) + WAL; StorageEngine impl
+│   ├── memtable.rs           # MemTable trait + BTreeMap implementation
+│   ├── sstable.rs            # SSTable writer, sparse index, metadata manager
+│   └── lsm_tree.rs           # LSMTree: MemTable + WAL + flush; StorageEngine impl
 └── raft/
     ├── mod.rs                # Module declarations + generated proto inclusion
     ├── raft_types.rs         # Message types, log entries, RPC data structures
@@ -161,6 +164,22 @@ src/
         ├── election.rs       # Leader election (RequestVote send/receive)
         ├── replication.rs    # Log replication (AppendEntries send/receive)
         └── log.rs            # Log helpers (last_log_index, get_log_entry, get_log_term)
+```
+
+## Quick Start (Single Node)
+
+A single-node cluster elects itself leader immediately — useful for exploring the API without managing multiple terminals.
+
+```bash
+cargo run -- --id node1 --port 5001
+```
+
+```bash
+# Set a key
+grpcurl -plaintext -d '{"key": "foo", "value": "bar"}' 127.0.0.1:5001 proto.Raft/Set
+
+# Get it back
+grpcurl -plaintext -d '{"key": "foo"}' 127.0.0.1:5001 proto.Raft/Get
 ```
 
 ## Running a 3-Node Cluster
