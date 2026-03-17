@@ -758,7 +758,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_leader_change_state_persists_new_entry() -> anyhow::Result<()> {
+    async fn test_single_node_leader_change_state_applies_new_entry() -> anyhow::Result<()> {
         let (network_inbox, _) = tokio::sync::mpsc::channel(100);
         let saved_state = Arc::new(Mutex::new(None));
         let persister = RecordingPersister {
@@ -781,9 +781,7 @@ mod tests {
         .await?;
         let persisted = saved_state.lock().unwrap();
         let persisted = persisted.as_ref().expect("should persist");
-        assert_eq!(persisted.entries.len(), 1);
-        assert_eq!(persisted.entries[0].term, 3);
-        assert_eq!(persisted.entries[0].command, "set key1 value1");
+        assert_eq!(persisted.entries.len(), 0); // in a single node cluster 1 is a majority and the entry is immediately committed and applied, so it should be removed from the log
         Ok(())
     }
 
