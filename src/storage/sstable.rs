@@ -1,5 +1,3 @@
-use crate::storage::encoder::Encoder;
-use crate::storage::entry::Entry;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -7,11 +5,15 @@ use std::io;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
-const SPARSE_INDEX_INTERVAL: usize = 100;
-
 #[async_trait::async_trait]
 pub(super) trait SSTablesStorage {
-    async fn flush(&mut self, entries: &[Entry]) -> io::Result<()>;
+    async fn flush(
+        &mut self,
+        data: &[u8],
+        sparse_index: &[(Vec<u8>, u64)],
+        min_key: Vec<u8>,
+        max_key: Vec<u8>,
+    ) -> io::Result<()>;
     async fn read(&self, key: &[u8]) -> io::Result<Option<Vec<u8>>>;
 }
 
@@ -95,34 +97,25 @@ impl SSTablesStorage for SSTableStorageManager {
         Ok(None) // Placeholder implementation
     }
 
-    async fn flush(&mut self, entries: &[Entry]) -> io::Result<()> {
-        // Implement the logic to write the entries to a new SSTable file
-        // This could involve sorting the entries, writing them in a specific format, etc.
-        let mut encoded = Vec::new();
-
-        let min_key = entries.first().map(|e| e.key.clone()).unwrap_or_default();
-        let max_key = entries.last().map(|e| e.key.clone()).unwrap_or_default();
+    async fn flush(
+        &mut self,
+        data: &[u8],
+        sparse_index: &[(Vec<u8>, u64)],
+        min_key: Vec<u8>,
+        max_key: Vec<u8>,
+    ) -> io::Result<()> {
         let file_id = self.metadata.cur_max_file_id + 1;
         let path = format!("sstable_{}.dat", file_id);
         let sparse_index_path = format!("sstable_{}.dat.idx", file_id);
 
-        let mut sparse_index: Vec<(Vec<u8>, u64)> = Vec::new();
-        let mut sstable_metadata = SSTableFileMetadata {
+        let sstable_metadata = SSTableFileMetadata {
             file_id,
             file_path: path.clone(),
             min_key,
             max_key,
-            size_in_bytes: 0,   // This will be updated after writing the file
-            sparse_index: None, // This can be populated based on the entries and SPARSE_INDEX_INTERVAL
+            size_in_bytes: data.len() as u64,
+            sparse_index: None,
         };
-        let mut offset: u64 = 0;
-        for (counter, entry) in entries.iter().enumerate() {
-            if counter % SPARSE_INDEX_INTERVAL == 0 {
-                sparse_index.push((entry.key.clone(), offset));
-            }
-            let bytes_written = Encoder::encode_into(entry, &mut encoded);
-            offset += bytes_written as u64;
-        }
 
         // We want truncate so that retres are idempotent
         let mut file = OpenOptions::new()
@@ -132,7 +125,7 @@ impl SSTablesStorage for SSTableStorageManager {
             .open(&path)
             .await
             .expect("Failed to open SSTable file");
-        if let Err(e) = file.write_all(&encoded).await {
+        if let Err(e) = file.write_all(data).await {
             eprintln!("Failed to write to SSTable file: {}", e);
             return Err(e);
         }
@@ -167,7 +160,6 @@ impl SSTablesStorage for SSTableStorageManager {
             return Err(e);
         }
 
-        sstable_metadata.size_in_bytes = offset;
         self.metadata.cur_max_file_id = file_id;
         self.metadata
             .sstable_file_metadata

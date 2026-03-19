@@ -184,7 +184,6 @@ mod tests {
     use super::*;
     use crate::raft::raft_types::{AppendEntriesData, AppendEntriesReplyData};
     use crate::raft::state_persister::PersistentState;
-    use crate::storage::entry::Entry as WalEntry;
     use crate::storage::lsm_tree::LSMTree as RealLSMTree;
     use crate::storage::wal::WalStorage;
     use std::io;
@@ -195,11 +194,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WalStorage for MockWal {
-        async fn append(&mut self, _entry: &WalEntry) -> io::Result<()> {
+        async fn append(&mut self, _data: &[u8]) -> io::Result<()> {
             Ok(())
         }
 
-        async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
+        async fn read_all(&mut self) -> io::Result<Vec<u8>> {
             Ok(vec![])
         }
     }
