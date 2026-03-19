@@ -16,6 +16,13 @@ const FLUSH_WAL_PATH: &str = "wal.log.tmp";
 const WALL_FILE_PATH: &str = "wal.log";
 const SPARSE_INDEX_INTERVAL: usize = 100;
 
+struct EncodedFlush {
+    data: Vec<u8>,
+    sparse_index: Vec<(Vec<u8>, u64)>,
+    min_key: Vec<u8>,
+    max_key: Vec<u8>,
+}
+
 pub struct LSMTree {
     memtable: Box<dyn MemTable + Sync + Send>,
     wal: Box<dyn WalStorage + Sync + Send>,
@@ -43,8 +50,8 @@ impl LSMTree {
         }
     }
 
-    fn encode_for_flush(entries: &[Entry]) -> (Vec<u8>, Vec<(Vec<u8>, u64)>, Vec<u8>, Vec<u8>) {
-        let mut encoded = Vec::new();
+    fn encode_for_flush(entries: &[Entry]) -> EncodedFlush {
+        let mut data = Vec::new();
         let mut sparse_index: Vec<(Vec<u8>, u64)> = Vec::new();
         let min_key = entries.first().map(|e| e.key.clone()).unwrap_or_default();
         let max_key = entries.last().map(|e| e.key.clone()).unwrap_or_default();
@@ -53,10 +60,10 @@ impl LSMTree {
             if counter % SPARSE_INDEX_INTERVAL == 0 {
                 sparse_index.push((entry.key.clone(), offset));
             }
-            let bytes_written = Encoder::encode_into(entry, &mut encoded);
+            let bytes_written = Encoder::encode_into(entry, &mut data);
             offset += bytes_written as u64;
         }
-        (encoded, sparse_index, min_key, max_key)
+        EncodedFlush { data, sparse_index, min_key, max_key }
     }
 
     async fn flush(&mut self) -> anyhow::Result<()> {
@@ -76,10 +83,10 @@ impl LSMTree {
         self.flushing_wal = Some(std::mem::replace(&mut self.wal, new_wal));
 
         let old_entries = self.flushing_memtable.as_ref().unwrap().to_entries();
-        let (encoded, sparse_index, min_key, max_key) = Self::encode_for_flush(&old_entries);
+        let ef = Self::encode_for_flush(&old_entries);
         let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
         self.flush_finished = Some(rcv);
-        self.spawn_flush_task(snd, encoded, sparse_index, min_key, max_key, tmp_file_path.to_string())
+        self.spawn_flush_task(snd, ef.data, ef.sparse_index, ef.min_key, ef.max_key, tmp_file_path.to_string())
             .await;
         Ok(())
     }
@@ -247,9 +254,9 @@ impl StorageEngine for LSMTree {
             .as_ref()
             .expect("Flushing memtable should exist")
             .to_entries();
-        let (encoded, sparse_index, min_key, max_key) = Self::encode_for_flush(&old_entries);
+        let ef = Self::encode_for_flush(&old_entries);
         let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
-        self.spawn_flush_task(snd, encoded, sparse_index, min_key, max_key, FLUSH_WAL_PATH.to_string())
+        self.spawn_flush_task(snd, ef.data, ef.sparse_index, ef.min_key, ef.max_key, FLUSH_WAL_PATH.to_string())
             .await;
         self.flush_finished = Some(rcv);
         Ok(())
