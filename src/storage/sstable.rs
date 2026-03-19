@@ -12,6 +12,7 @@ const SPARSE_INDEX_INTERVAL: usize = 100;
 #[async_trait::async_trait]
 pub(super) trait SSTablesStorage {
     async fn flush(&mut self, entries: &[Entry]) -> io::Result<()>;
+    async fn read(&self, key: &[u8]) -> io::Result<Option<Vec<u8>>>;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -83,6 +84,17 @@ impl SSTableStorageManager {
 
 #[async_trait::async_trait]
 impl SSTablesStorage for SSTableStorageManager {
+    async fn read(&self, key: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        // Implement the logic to read the value for the given key from the SSTable files
+        // This could involve searching through the SSTable files in order, using the sparse index for faster lookups, etc.
+        for metadata in self.metadata.sstable_file_metadata.values() {
+            if key < metadata.min_key.as_slice() || key > metadata.max_key.as_slice() {
+                continue; // Skip files that cannot contain the key
+            }
+        }
+        Ok(None) // Placeholder implementation
+    }
+
     async fn flush(&mut self, entries: &[Entry]) -> io::Result<()> {
         // Implement the logic to write the entries to a new SSTable file
         // This could involve sorting the entries, writing them in a specific format, etc.
