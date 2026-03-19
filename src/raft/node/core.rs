@@ -318,6 +318,7 @@ mod tests {
     use super::*;
     use crate::raft::raft_types::{AppendEntriesData, RequestVoteData, RequestVoteReplyData};
     use crate::raft::state_persister::PersistentState;
+    use crate::storage::encoder::Encoder;
     use crate::storage::entry::Entry as WalEntry;
     use crate::storage::lsm_tree::LSMTree as RealLSMTree;
     use crate::storage::wal::WalStorage;
@@ -337,28 +338,38 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WalStorage for MockWal {
-        async fn append(&mut self, _entry: &WalEntry) -> io::Result<()> {
+        async fn append(&mut self, _data: &[u8]) -> io::Result<()> {
             Ok(())
         }
 
-        async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
+        async fn read_all(&mut self) -> io::Result<Vec<u8>> {
             Ok(vec![])
         }
     }
 
-    /// A mock WAL that returns a fixed, pre-loaded set of entries from `read_all`.
+    /// A mock WAL that returns pre-encoded bytes from `read_all`.
     struct PreloadedMockWal {
-        entries: Vec<WalEntry>,
+        data: Vec<u8>,
+    }
+
+    impl PreloadedMockWal {
+        fn from_entries(entries: &[WalEntry]) -> Self {
+            let mut data = Vec::new();
+            for entry in entries {
+                data.extend_from_slice(&Encoder::encode(entry));
+            }
+            Self { data }
+        }
     }
 
     #[async_trait::async_trait]
     impl WalStorage for PreloadedMockWal {
-        async fn append(&mut self, _entry: &WalEntry) -> io::Result<()> {
+        async fn append(&mut self, _data: &[u8]) -> io::Result<()> {
             Ok(())
         }
 
-        async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
-            Ok(self.entries.clone())
+        async fn read_all(&mut self) -> io::Result<Vec<u8>> {
+            Ok(self.data.clone())
         }
     }
 
@@ -539,12 +550,10 @@ mod tests {
         };
         // Pre-populate the WAL with the two committed entries so that WAL recovery
         // restores the state machine instead of relying on apply_commands.
-        let wal = PreloadedMockWal {
-            entries: vec![
-                WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
-                WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
-            ],
-        };
+        let wal = PreloadedMockWal::from_entries(&[
+            WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
+            WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
+        ]);
         let mut node = Node::new(
             vec![],
             network_inbox,
@@ -589,13 +598,11 @@ mod tests {
             },
         };
         // Pre-populate the WAL with all three committed entries.
-        let wal = PreloadedMockWal {
-            entries: vec![
-                WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
-                WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
-                WalEntry::set(3, b"key1".to_vec(), b"val3".to_vec()),
-            ],
-        };
+        let wal = PreloadedMockWal::from_entries(&[
+            WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
+            WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
+            WalEntry::set(3, b"key1".to_vec(), b"val3".to_vec()),
+        ]);
         let mut node = Node::new(
             vec![],
             network_inbox,
@@ -638,12 +645,10 @@ mod tests {
                 snapshot_last_term: 1,
             },
         };
-        let wal = PreloadedMockWal {
-            entries: vec![
-                WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
-                WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
-            ],
-        };
+        let wal = PreloadedMockWal::from_entries(&[
+            WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
+            WalEntry::set(2, b"key2".to_vec(), b"val2".to_vec()),
+        ]);
         let mut node = Node::new(
             vec![],
             network_inbox,
@@ -683,12 +688,10 @@ mod tests {
                 snapshot_last_term: 1,
             },
         };
-        let wal = PreloadedMockWal {
-            entries: vec![
-                WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
-                WalEntry::set(2, b"key1".to_vec(), b"val2".to_vec()),
-            ],
-        };
+        let wal = PreloadedMockWal::from_entries(&[
+            WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
+            WalEntry::set(2, b"key1".to_vec(), b"val2".to_vec()),
+        ]);
         let mut node = Node::new(
             vec![],
             network_inbox,
@@ -735,9 +738,9 @@ mod tests {
             },
         };
         // … but the WAL only recorded the first one before the crash.
-        let wal = PreloadedMockWal {
-            entries: vec![WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec())],
-        };
+        let wal = PreloadedMockWal::from_entries(&[
+            WalEntry::set(1, b"key1".to_vec(), b"val1".to_vec()),
+        ]);
         let mut node = Node::new(
             vec![],
             network_inbox,

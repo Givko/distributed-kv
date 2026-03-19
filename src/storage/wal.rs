@@ -1,5 +1,3 @@
-use crate::storage::encoder::Encoder;
-use crate::storage::entry::Entry;
 use std::io;
 use std::path::PathBuf;
 use tokio::fs::{File, OpenOptions};
@@ -7,8 +5,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 #[async_trait::async_trait]
 pub trait WalStorage: Send + Sync {
-    async fn append(&mut self, entry: &Entry) -> io::Result<()>;
-    async fn read_all(&mut self) -> io::Result<Vec<Entry>>;
+    async fn append(&mut self, data: &[u8]) -> io::Result<()>;
+    async fn read_all(&mut self) -> io::Result<Vec<u8>>;
 }
 
 pub struct Wal {
@@ -34,23 +32,18 @@ impl Wal {
 
 #[async_trait::async_trait]
 impl WalStorage for Wal {
-    async fn append(&mut self, entry: &Entry) -> io::Result<()> {
-        let encoded = Encoder::encode(entry);
-
-        self.file_handle.write_all(&encoded).await?;
+    async fn append(&mut self, data: &[u8]) -> io::Result<()> {
+        self.file_handle.write_all(data).await?;
         self.file_handle.flush().await?;
         self.file_handle.sync_all().await?;
         Ok(())
     }
 
-    async fn read_all(&mut self) -> io::Result<Vec<Entry>> {
+    async fn read_all(&mut self) -> io::Result<Vec<u8>> {
         let mut buffer = Vec::new();
         self.file_handle.rewind().await?;
         self.file_handle.read_to_end(&mut buffer).await?;
-
-        let cursor = 0;
-        let entries = Encoder::decode_all(&buffer[cursor..])?;
         self.file_handle.rewind().await?;
-        Ok(entries)
+        Ok(buffer)
     }
 }
