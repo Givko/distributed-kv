@@ -14,6 +14,7 @@ pub(super) trait SSTablesStorage {
         min_key: Vec<u8>,
         max_key: Vec<u8>,
     ) -> io::Result<()>;
+    #[allow(dead_code)]
     async fn read(&self, key: &[u8]) -> io::Result<Option<Vec<u8>>>;
 }
 
