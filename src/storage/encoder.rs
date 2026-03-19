@@ -92,7 +92,8 @@ impl Encoder {
         bytes.extend_from_slice(key);
         bytes.extend_from_slice(&value_len_bytes);
         bytes.extend_from_slice(value);
-        len
+
+        bytes.len() as u32
     }
 
     pub fn decode_all(data: &[u8]) -> io::Result<Vec<Entry>> {

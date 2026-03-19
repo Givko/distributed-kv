@@ -11,10 +11,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot::error::TryRecvError;
 
-const FLUSH_THRESHOLD_BYTES: usize = 80; // 1 MB
+const FLUSH_THRESHOLD_BYTES: usize = 1024; // 1 MB
 const FLUSH_WAL_PATH: &str = "wal.log.tmp";
 const WALL_FILE_PATH: &str = "wal.log";
-const SPARSE_INDEX_INTERVAL: usize = 100;
+const SPARSE_INDEX_INTERVAL: usize = 2;
 
 struct EncodedFlush {
     data: Vec<u8>,
@@ -60,18 +60,25 @@ impl LSMTree {
             if counter % SPARSE_INDEX_INTERVAL == 0 {
                 sparse_index.push((entry.key.clone(), offset));
             }
+
             let bytes_written = Encoder::encode_into(entry, &mut data);
             offset += bytes_written as u64;
         }
-        EncodedFlush { data, sparse_index, min_key, max_key }
+
+        EncodedFlush {
+            data,
+            sparse_index,
+            min_key,
+            max_key,
+        }
     }
 
     async fn flush(&mut self) -> anyhow::Result<()> {
         // rename old WAL as flushing to be able to locate it on recovery if flush fails
         let file_path = WALL_FILE_PATH;
         let tmp_file_path = FLUSH_WAL_PATH;
-
         tokio::fs::rename(file_path, tmp_file_path).await?;
+
         //Save old memtable and wal for recovery if flush fails
         let new_wal_path = PathBuf::from(file_path);
         let new_wal = Box::new(Wal::new(new_wal_path).await); // Start a new WAL file for the new memtable
@@ -86,8 +93,16 @@ impl LSMTree {
         let ef = Self::encode_for_flush(&old_entries);
         let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
         self.flush_finished = Some(rcv);
-        self.spawn_flush_task(snd, ef.data, ef.sparse_index, ef.min_key, ef.max_key, tmp_file_path.to_string())
-            .await;
+        self.spawn_flush_task(
+            snd,
+            ef.data,
+            ef.sparse_index,
+            ef.min_key,
+            ef.max_key,
+            tmp_file_path.to_string(),
+        )
+        .await;
+
         Ok(())
     }
 
@@ -103,7 +118,10 @@ impl LSMTree {
         let sstable_manager = self.sstable_manager.clone();
         tokio::spawn(async move {
             let mut sstable_manager = sstable_manager.lock().await;
-            if let Err(e) = sstable_manager.flush(&encoded_data, &sparse_index, min_key, max_key).await {
+            if let Err(e) = sstable_manager
+                .flush(&encoded_data, &sparse_index, min_key, max_key)
+                .await
+            {
                 eprintln!("Failed to flush memtable to SSTable: {e}");
                 notification_channel
                     .send(false)
@@ -170,11 +188,54 @@ impl StorageEngine for LSMTree {
             .get(key)
             .cloned()
             .or_else(|| self.flushing_memtable.as_ref()?.get(key).cloned());
-        match entry {
+
+        eprintln!(
+            "Get for key: {}, found in memtable: {:?}",
+            String::from_utf8_lossy(key),
+            entry
+        );
+        let res = match entry {
             Some(MemTableEntry::Value { value, .. }) => GetResult::Value(value),
             Some(MemTableEntry::Tombstone { .. }) => GetResult::Tombstone,
             None => GetResult::NotFound,
+        };
+
+        eprintln!(
+            "Get result for key: {}, result: {:?}",
+            String::from_utf8_lossy(key),
+            res
+        );
+        if res == GetResult::NotFound {
+            // If not found in memtable or flushing memtable, check SSTables
+
+            eprintln!(
+                "Key: {} not found in memtable or flushing memtable, checking SSTables",
+                String::from_utf8_lossy(key)
+            );
+            let sstable_manager = self.sstable_manager.lock().await;
+            let result = match sstable_manager.read(key).await {
+                Ok(Some(value)) => return GetResult::Value(value),
+                Ok(None) => GetResult::NotFound,
+                Err(e) => {
+                    eprintln!("Failed to read from SSTables: {e}");
+                    GetResult::NotFound // Treat read errors as not found for now
+                }
+            };
+            eprintln!(
+                "Get result for key: {}, found in SSTables, returning result: {:?}",
+                String::from_utf8_lossy(key),
+                result
+            );
+
+            return result;
         }
+
+        eprintln!(
+            "Get result for key: {}, found in memtable or flushing memtable, returning result: {:?}",
+            String::from_utf8_lossy(key),
+            res
+        );
+        return res;
     }
 
     async fn set(&mut self, raft_index: u64, key: Vec<u8>, value: Vec<u8>) {
@@ -262,8 +323,15 @@ impl StorageEngine for LSMTree {
             .to_entries();
         let ef = Self::encode_for_flush(&old_entries);
         let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
-        self.spawn_flush_task(snd, ef.data, ef.sparse_index, ef.min_key, ef.max_key, FLUSH_WAL_PATH.to_string())
-            .await;
+        self.spawn_flush_task(
+            snd,
+            ef.data,
+            ef.sparse_index,
+            ef.min_key,
+            ef.max_key,
+            FLUSH_WAL_PATH.to_string(),
+        )
+        .await;
         self.flush_finished = Some(rcv);
         Ok(())
     }
@@ -344,10 +412,7 @@ mod tests {
     async fn test_get_existing_key_returns_value() {
         let mut tree = make_tree().await;
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
-        assert_eq!(
-            tree.get(b"k").await,
-            GetResult::Value(b"v".to_vec())
-        );
+        assert_eq!(tree.get(b"k").await, GetResult::Value(b"v".to_vec()));
     }
 
     // ── set ──────────────────────────────────────────────────────────────────
@@ -357,10 +422,7 @@ mod tests {
         let mut tree = make_tree().await;
         tree.set(1, b"k".to_vec(), b"v1".to_vec()).await;
         tree.set(2, b"k".to_vec(), b"v2".to_vec()).await;
-        assert_eq!(
-            tree.get(b"k").await,
-            GetResult::Value(b"v2".to_vec())
-        );
+        assert_eq!(tree.get(b"k").await, GetResult::Value(b"v2".to_vec()));
     }
 
     #[tokio::test]
@@ -394,20 +456,14 @@ mod tests {
         let mut tree = make_tree().await;
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
         tree.delete(2, b"k").await;
-        assert_eq!(
-            tree.get(b"k").await,
-            GetResult::Tombstone
-        );
+        assert_eq!(tree.get(b"k").await, GetResult::Tombstone);
     }
 
     #[tokio::test]
     async fn test_delete_missing_key_returns_false() {
         let mut tree = make_tree().await;
         tree.delete(1, b"missing").await;
-        assert_eq!(
-            tree.get(b"missing").await,
-            GetResult::Tombstone
-        );
+        assert_eq!(tree.get(b"missing").await, GetResult::Tombstone);
     }
 
     #[tokio::test]
@@ -416,10 +472,7 @@ mod tests {
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
         tree.delete(2, b"k").await;
         // Deleted key has a tombstone — distinguishable from a never-set key.
-        assert_eq!(
-            tree.get(b"k").await,
-            GetResult::Tombstone
-        );
+        assert_eq!(tree.get(b"k").await, GetResult::Tombstone);
     }
 
     #[tokio::test]
@@ -428,10 +481,7 @@ mod tests {
         let mut tree = make_tree().await;
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
         tree.delete(5, b"k").await; // non-contiguous raft index
-        assert_eq!(
-            tree.get(b"k").await,
-            GetResult::Tombstone
-        );
+        assert_eq!(tree.get(b"k").await, GetResult::Tombstone);
     }
 
     #[tokio::test]
@@ -441,10 +491,7 @@ mod tests {
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
         tree.delete(2, b"k").await;
         tree.delete(3, b"k").await;
-        assert_eq!(
-            tree.get(b"k").await,
-            GetResult::Tombstone
-        );
+        assert_eq!(tree.get(b"k").await, GetResult::Tombstone);
     }
 
     #[tokio::test]
@@ -452,10 +499,7 @@ mod tests {
         // Deleting a key that was never set still stores a tombstone with the correct index.
         let mut tree = make_tree().await;
         tree.delete(7, b"ghost").await;
-        assert_eq!(
-            tree.get(b"ghost").await,
-            GetResult::Tombstone
-        );
+        assert_eq!(tree.get(b"ghost").await, GetResult::Tombstone);
     }
 
     #[tokio::test]
@@ -484,14 +528,8 @@ mod tests {
         ]);
         let mut tree = LSMTree::with_wal(Box::new(wal)).await;
         _ = tree.recover().await;
-        assert_eq!(
-            tree.get(b"k1").await,
-            GetResult::Value(b"v1".to_vec())
-        );
-        assert_eq!(
-            tree.get(b"k2").await,
-            GetResult::Value(b"v2".to_vec())
-        );
+        assert_eq!(tree.get(b"k1").await, GetResult::Value(b"v1".to_vec()));
+        assert_eq!(tree.get(b"k2").await, GetResult::Value(b"v2".to_vec()));
     }
 
     #[tokio::test]
@@ -504,10 +542,7 @@ mod tests {
         let mut tree = LSMTree::with_wal(Box::new(wal)).await;
         _ = tree.recover().await;
         // After recovery the key carries a tombstone, not a value and not absent.
-        assert_eq!(
-            tree.get(b"k").await,
-            GetResult::Tombstone
-        );
+        assert_eq!(tree.get(b"k").await, GetResult::Tombstone);
     }
 
     #[tokio::test]
@@ -520,10 +555,7 @@ mod tests {
         ]);
         let mut tree = LSMTree::with_wal(Box::new(wal)).await;
         _ = tree.recover().await;
-        assert_eq!(
-            tree.get(b"k").await,
-            GetResult::Tombstone
-        );
+        assert_eq!(tree.get(b"k").await, GetResult::Tombstone);
     }
 
     #[tokio::test]
@@ -535,10 +567,7 @@ mod tests {
         ]);
         let mut tree = LSMTree::with_wal(Box::new(wal)).await;
         _ = tree.recover().await;
-        assert_eq!(
-            tree.get(b"k").await,
-            GetResult::Value(b"v2".to_vec())
-        );
+        assert_eq!(tree.get(b"k").await, GetResult::Value(b"v2".to_vec()));
     }
 
     #[tokio::test]
@@ -551,10 +580,7 @@ mod tests {
         ]);
         let mut tree = LSMTree::with_wal(Box::new(wal)).await;
         _ = tree.recover().await;
-        assert_eq!(
-            tree.get(b"k").await,
-            GetResult::Value(b"v2".to_vec())
-        );
+        assert_eq!(tree.get(b"k").await, GetResult::Value(b"v2".to_vec()));
     }
 
     #[tokio::test]
@@ -572,18 +598,9 @@ mod tests {
         tree.set(1, b"a".to_vec(), b"1".to_vec()).await;
         tree.set(2, b"b".to_vec(), b"2".to_vec()).await;
         tree.set(3, b"c".to_vec(), b"3".to_vec()).await;
-        assert_eq!(
-            tree.get(b"a").await,
-            GetResult::Value(b"1".to_vec())
-        );
-        assert_eq!(
-            tree.get(b"b").await,
-            GetResult::Value(b"2".to_vec())
-        );
-        assert_eq!(
-            tree.get(b"c").await,
-            GetResult::Value(b"3".to_vec())
-        );
+        assert_eq!(tree.get(b"a").await, GetResult::Value(b"1".to_vec()));
+        assert_eq!(tree.get(b"b").await, GetResult::Value(b"2".to_vec()));
+        assert_eq!(tree.get(b"c").await, GetResult::Value(b"3".to_vec()));
     }
 
     #[tokio::test]
@@ -593,10 +610,7 @@ mod tests {
         tree.set(1, b"k".to_vec(), b"v1".to_vec()).await;
         tree.delete(2, b"k").await;
         tree.set(3, b"k".to_vec(), b"v2".to_vec()).await;
-        assert_eq!(
-            tree.get(b"k").await,
-            GetResult::Value(b"v2".to_vec())
-        );
+        assert_eq!(tree.get(b"k").await, GetResult::Value(b"v2".to_vec()));
     }
 
     #[tokio::test]
@@ -613,16 +627,10 @@ mod tests {
         _ = tree.recover().await;
 
         tree.set(4, b"k3".to_vec(), b"v3".to_vec()).await;
-        assert_eq!(
-            tree.get(b"k3").await,
-            GetResult::Value(b"v3".to_vec())
-        );
+        assert_eq!(tree.get(b"k3").await, GetResult::Value(b"v3".to_vec()));
 
         tree.set(5, b"k4".to_vec(), b"v4".to_vec()).await;
-        assert_eq!(
-            tree.get(b"k4").await,
-            GetResult::Value(b"v4".to_vec())
-        );
+        assert_eq!(tree.get(b"k4").await, GetResult::Value(b"v4".to_vec()));
     }
 
     #[tokio::test]
