@@ -1,4 +1,9 @@
-use crate::storage::memtable::MemTableEntry;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GetResult {
+    Value(Vec<u8>),
+    Tombstone,
+    NotFound,
+}
 
 #[async_trait::async_trait]
 pub trait StorageEngine {
@@ -6,9 +11,7 @@ pub trait StorageEngine {
 
     async fn delete(&mut self, raft_index: u64, key: &[u8]);
 
-    /// Returns `None` if the key has never been set, `Some(Entry::Value(_))` if
-    /// it exists, or `Some(Entry::Tombstone)` if it was deleted.
-    async fn get(&mut self, key: &[u8]) -> Option<MemTableEntry>;
+    async fn get(&mut self, key: &[u8]) -> GetResult;
 
     async fn recover(&mut self) -> anyhow::Result<()>;
 }
@@ -59,10 +62,7 @@ impl<SM: StorageEngine> StateMachine<SM> {
 
     pub async fn get(&mut self, key: &str) -> Option<String> {
         match self.engine.get(key.as_bytes()).await {
-            Some(MemTableEntry::Value {
-                logical_index: _,
-                value,
-            }) => String::from_utf8(value).ok(),
+            GetResult::Value(v) => String::from_utf8(v).ok(),
             _ => None,
         }
     }
@@ -88,11 +88,11 @@ mod tests {
             self.data.remove(key);
         }
 
-        async fn get(&mut self, key: &[u8]) -> Option<MemTableEntry> {
-            self.data.get(key).map(|v| MemTableEntry::Value {
-                logical_index: 0,
-                value: v.clone(),
-            })
+        async fn get(&mut self, key: &[u8]) -> GetResult {
+            match self.data.get(key) {
+                Some(v) => GetResult::Value(v.clone()),
+                None => GetResult::NotFound,
+            }
         }
 
         async fn recover(&mut self) -> anyhow::Result<()> {

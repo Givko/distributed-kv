@@ -1,6 +1,6 @@
 use tokio::fs::OpenOptions;
 
-use crate::raft::state_machine::StorageEngine;
+use crate::raft::state_machine::{GetResult, StorageEngine};
 use crate::storage::encoder::Encoder;
 use crate::storage::entry::Entry;
 use crate::storage::memtable::{BTreeMapMemTable, MemTable, MemTableEntry};
@@ -163,12 +163,18 @@ impl LSMTree {
 
 #[async_trait::async_trait]
 impl StorageEngine for LSMTree {
-    async fn get(&mut self, key: &[u8]) -> Option<MemTableEntry> {
+    async fn get(&mut self, key: &[u8]) -> GetResult {
         self.clean_flush_state().await; // Check if any flush has completed and clean up state accordingly before processing the get
-        self.memtable
+        let entry = self
+            .memtable
             .get(key)
             .cloned()
-            .or_else(|| self.flushing_memtable.as_ref()?.get(key).cloned())
+            .or_else(|| self.flushing_memtable.as_ref()?.get(key).cloned());
+        match entry {
+            Some(MemTableEntry::Value { value, .. }) => GetResult::Value(value),
+            Some(MemTableEntry::Tombstone { .. }) => GetResult::Tombstone,
+            None => GetResult::NotFound,
+        }
     }
 
     async fn set(&mut self, raft_index: u64, key: Vec<u8>, value: Vec<u8>) {
@@ -266,6 +272,7 @@ impl StorageEngine for LSMTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raft::state_machine::GetResult;
     use crate::storage::encoder::Encoder;
     use crate::storage::entry::{Entry as WalEntry, OP_DELETE, OP_SET};
     use crate::storage::wal::WalStorage;
@@ -330,7 +337,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_missing_key_returns_none() {
         let mut tree = make_tree().await;
-        assert_eq!(tree.get(b"missing").await, None); // truly absent → None
+        assert_eq!(tree.get(b"missing").await, GetResult::NotFound);
     }
 
     #[tokio::test]
@@ -339,10 +346,7 @@ mod tests {
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Value {
-                logical_index: 1,
-                value: b"v".to_vec()
-            })
+            GetResult::Value(b"v".to_vec())
         );
     }
 
@@ -355,10 +359,7 @@ mod tests {
         tree.set(2, b"k".to_vec(), b"v2".to_vec()).await;
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Value {
-                logical_index: 2,
-                value: b"v2".to_vec()
-            })
+            GetResult::Value(b"v2".to_vec())
         );
     }
 
@@ -395,7 +396,7 @@ mod tests {
         tree.delete(2, b"k").await;
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Tombstone { logical_index: 2 })
+            GetResult::Tombstone
         );
     }
 
@@ -405,7 +406,7 @@ mod tests {
         tree.delete(1, b"missing").await;
         assert_eq!(
             tree.get(b"missing").await,
-            Some(MemTableEntry::Tombstone { logical_index: 1 })
+            GetResult::Tombstone
         );
     }
 
@@ -417,7 +418,7 @@ mod tests {
         // Deleted key has a tombstone — distinguishable from a never-set key.
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Tombstone { logical_index: 2 })
+            GetResult::Tombstone
         );
     }
 
@@ -429,7 +430,7 @@ mod tests {
         tree.delete(5, b"k").await; // non-contiguous raft index
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Tombstone { logical_index: 5 })
+            GetResult::Tombstone
         );
     }
 
@@ -442,7 +443,7 @@ mod tests {
         tree.delete(3, b"k").await;
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Tombstone { logical_index: 3 })
+            GetResult::Tombstone
         );
     }
 
@@ -453,7 +454,7 @@ mod tests {
         tree.delete(7, b"ghost").await;
         assert_eq!(
             tree.get(b"ghost").await,
-            Some(MemTableEntry::Tombstone { logical_index: 7 })
+            GetResult::Tombstone
         );
     }
 
@@ -485,17 +486,11 @@ mod tests {
         _ = tree.recover().await;
         assert_eq!(
             tree.get(b"k1").await,
-            Some(MemTableEntry::Value {
-                logical_index: 1,
-                value: b"v1".to_vec()
-            })
+            GetResult::Value(b"v1".to_vec())
         );
         assert_eq!(
             tree.get(b"k2").await,
-            Some(MemTableEntry::Value {
-                logical_index: 2,
-                value: b"v2".to_vec()
-            })
+            GetResult::Value(b"v2".to_vec())
         );
     }
 
@@ -511,7 +506,7 @@ mod tests {
         // After recovery the key carries a tombstone, not a value and not absent.
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Tombstone { logical_index: 2 })
+            GetResult::Tombstone
         );
     }
 
@@ -527,7 +522,7 @@ mod tests {
         _ = tree.recover().await;
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Tombstone { logical_index: 4 })
+            GetResult::Tombstone
         );
     }
 
@@ -542,10 +537,7 @@ mod tests {
         _ = tree.recover().await;
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Value {
-                logical_index: 2,
-                value: b"v2".to_vec()
-            })
+            GetResult::Value(b"v2".to_vec())
         );
     }
 
@@ -561,10 +553,7 @@ mod tests {
         _ = tree.recover().await;
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Value {
-                logical_index: 3,
-                value: b"v2".to_vec()
-            })
+            GetResult::Value(b"v2".to_vec())
         );
     }
 
@@ -572,7 +561,7 @@ mod tests {
     async fn test_recover_empty_wal_leaves_tree_empty() {
         let mut tree = make_tree().await;
         _ = tree.recover().await;
-        assert_eq!(tree.get(b"k").await, None); // truly absent → None
+        assert_eq!(tree.get(b"k").await, GetResult::NotFound);
     }
 
     // ── logical_index correctness ────────────────────────────────────────────
@@ -585,24 +574,15 @@ mod tests {
         tree.set(3, b"c".to_vec(), b"3".to_vec()).await;
         assert_eq!(
             tree.get(b"a").await,
-            Some(MemTableEntry::Value {
-                logical_index: 1,
-                value: b"1".to_vec()
-            })
+            GetResult::Value(b"1".to_vec())
         );
         assert_eq!(
             tree.get(b"b").await,
-            Some(MemTableEntry::Value {
-                logical_index: 2,
-                value: b"2".to_vec()
-            })
+            GetResult::Value(b"2".to_vec())
         );
         assert_eq!(
             tree.get(b"c").await,
-            Some(MemTableEntry::Value {
-                logical_index: 3,
-                value: b"3".to_vec()
-            })
+            GetResult::Value(b"3".to_vec())
         );
     }
 
@@ -615,10 +595,7 @@ mod tests {
         tree.set(3, b"k".to_vec(), b"v2".to_vec()).await;
         assert_eq!(
             tree.get(b"k").await,
-            Some(MemTableEntry::Value {
-                logical_index: 3,
-                value: b"v2".to_vec()
-            })
+            GetResult::Value(b"v2".to_vec())
         );
     }
 
@@ -638,19 +615,13 @@ mod tests {
         tree.set(4, b"k3".to_vec(), b"v3".to_vec()).await;
         assert_eq!(
             tree.get(b"k3").await,
-            Some(MemTableEntry::Value {
-                logical_index: 4,
-                value: b"v3".to_vec()
-            })
+            GetResult::Value(b"v3".to_vec())
         );
 
         tree.set(5, b"k4".to_vec(), b"v4".to_vec()).await;
         assert_eq!(
             tree.get(b"k4").await,
-            Some(MemTableEntry::Value {
-                logical_index: 5,
-                value: b"v4".to_vec()
-            })
+            GetResult::Value(b"v4".to_vec())
         );
     }
 
