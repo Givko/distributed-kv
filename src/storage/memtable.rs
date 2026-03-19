@@ -17,8 +17,6 @@ pub trait MemTable {
     fn delete(&mut self, logical_index: u64, key: &[u8]);
     fn get(&self, key: &[u8]) -> Option<&MemTableEntry>;
     fn to_entries(&self) -> Vec<Entry>; // ordered snapshot for flushing — owns the flush conversion logic
-    fn clear(&mut self);
-    fn is_empty(&self) -> bool;
     fn size_in_bytes(&self) -> usize; // used to decide when to trigger a flush
     fn extend(&mut self, entries: Vec<Entry>);
 }
@@ -87,15 +85,6 @@ impl MemTable for BTreeMapMemTable {
                 }
             })
             .collect()
-    }
-
-    fn clear(&mut self) {
-        self.map.clear();
-        self.cur_size_bytes = 0;
-    }
-
-    fn is_empty(&self) -> bool {
-        self.map.is_empty()
     }
 
     fn size_in_bytes(&self) -> usize {
@@ -201,20 +190,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn size_bytes_resets_to_zero_after_clear() {
-        let mut table = BTreeMapMemTable::new();
-
-        table.set(1, b"key1".to_vec(), b"value1".to_vec());
-        table.set(2, b"key2".to_vec(), b"value2".to_vec());
-        assert!(
-            table.size_in_bytes() > 0,
-            "size should be non-zero before clear"
-        );
-
-        table.clear();
-        assert_eq!(table.size_in_bytes(), 0, "size should be zero after clear");
-    }
 
     #[test]
     fn size_bytes_tracks_delete_tombstone() {

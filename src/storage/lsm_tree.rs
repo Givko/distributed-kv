@@ -1,6 +1,7 @@
 use tokio::fs::OpenOptions;
 
 use crate::raft::state_machine::StorageEngine;
+use crate::storage::encoder::Encoder;
 use crate::storage::entry::Entry;
 use crate::storage::memtable::{BTreeMapMemTable, MemTable, MemTableEntry};
 use crate::storage::sstable::{SSTableStorageManager, SSTablesStorage};
@@ -13,6 +14,7 @@ use tokio::sync::oneshot::error::TryRecvError;
 const FLUSH_THRESHOLD_BYTES: usize = 80; // 1 MB
 const FLUSH_WAL_PATH: &str = "wal.log.tmp";
 const WALL_FILE_PATH: &str = "wal.log";
+const SPARSE_INDEX_INTERVAL: usize = 100;
 
 pub struct LSMTree {
     memtable: Box<dyn MemTable + Sync + Send>,
@@ -41,6 +43,22 @@ impl LSMTree {
         }
     }
 
+    fn encode_for_flush(entries: &[Entry]) -> (Vec<u8>, Vec<(Vec<u8>, u64)>, Vec<u8>, Vec<u8>) {
+        let mut encoded = Vec::new();
+        let mut sparse_index: Vec<(Vec<u8>, u64)> = Vec::new();
+        let min_key = entries.first().map(|e| e.key.clone()).unwrap_or_default();
+        let max_key = entries.last().map(|e| e.key.clone()).unwrap_or_default();
+        let mut offset: u64 = 0;
+        for (counter, entry) in entries.iter().enumerate() {
+            if counter % SPARSE_INDEX_INTERVAL == 0 {
+                sparse_index.push((entry.key.clone(), offset));
+            }
+            let bytes_written = Encoder::encode_into(entry, &mut encoded);
+            offset += bytes_written as u64;
+        }
+        (encoded, sparse_index, min_key, max_key)
+    }
+
     async fn flush(&mut self) -> anyhow::Result<()> {
         // rename old WAL as flushing to be able to locate it on recovery if flush fails
         let file_path = WALL_FILE_PATH;
@@ -58,9 +76,10 @@ impl LSMTree {
         self.flushing_wal = Some(std::mem::replace(&mut self.wal, new_wal));
 
         let old_entries = self.flushing_memtable.as_ref().unwrap().to_entries();
+        let (encoded, sparse_index, min_key, max_key) = Self::encode_for_flush(&old_entries);
         let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
         self.flush_finished = Some(rcv);
-        self.spawn_flush_task(snd, old_entries, tmp_file_path.to_string())
+        self.spawn_flush_task(snd, encoded, sparse_index, min_key, max_key, tmp_file_path.to_string())
             .await;
         Ok(())
     }
@@ -68,13 +87,16 @@ impl LSMTree {
     async fn spawn_flush_task(
         &mut self,
         notification_channel: tokio::sync::oneshot::Sender<bool>,
-        old_entries: Vec<Entry>,
+        encoded_data: Vec<u8>,
+        sparse_index: Vec<(Vec<u8>, u64)>,
+        min_key: Vec<u8>,
+        max_key: Vec<u8>,
         tmp_file_path: String,
     ) {
         let sstable_manager = self.sstable_manager.clone();
         tokio::spawn(async move {
             let mut sstable_manager = sstable_manager.lock().await;
-            if let Err(e) = sstable_manager.flush(&old_entries).await {
+            if let Err(e) = sstable_manager.flush(&encoded_data, &sparse_index, min_key, max_key).await {
                 eprintln!("Failed to flush memtable to SSTable: {e}");
                 notification_channel
                     .send(false)
@@ -144,8 +166,9 @@ impl StorageEngine for LSMTree {
 
     async fn set(&mut self, raft_index: u64, key: Vec<u8>, value: Vec<u8>) {
         let set_entry = Entry::set(raft_index, key.clone(), value.clone());
+        let encoded = Encoder::encode(&set_entry);
         self.wal
-            .append(&set_entry)
+            .append(&encoded)
             .await
             .expect("Failed to write to WAL");
         self.memtable.set(raft_index, key, value);
@@ -157,8 +180,9 @@ impl StorageEngine for LSMTree {
 
     async fn delete(&mut self, raft_index: u64, key: &[u8]) {
         let delete_entry = Entry::delete(raft_index, key.to_vec());
+        let encoded = Encoder::encode(&delete_entry);
         self.wal
-            .append(&delete_entry)
+            .append(&encoded)
             .await
             .expect("Failed to write to WAL");
         self.memtable.delete(raft_index, key);
@@ -170,7 +194,8 @@ impl StorageEngine for LSMTree {
 
     async fn recover(&mut self) -> anyhow::Result<()> {
         match self.wal.read_all().await {
-            Ok(entries) => {
+            Ok(data) => {
+                let entries = Encoder::decode_all(&data)?;
                 self.memtable.extend(entries);
             }
             Err(e) => {
@@ -204,7 +229,8 @@ impl StorageEngine for LSMTree {
             .read_all()
             .await
         {
-            Ok(entries) => {
+            Ok(data) => {
+                let entries = Encoder::decode_all(&data)?;
                 self.flushing_memtable
                     .as_mut()
                     .expect("Flushing memtable should exist")
@@ -221,8 +247,9 @@ impl StorageEngine for LSMTree {
             .as_ref()
             .expect("Flushing memtable should exist")
             .to_entries();
+        let (encoded, sparse_index, min_key, max_key) = Self::encode_for_flush(&old_entries);
         let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
-        self.spawn_flush_task(snd, old_entries, FLUSH_WAL_PATH.to_string())
+        self.spawn_flush_task(snd, encoded, sparse_index, min_key, max_key, FLUSH_WAL_PATH.to_string())
             .await;
         self.flush_finished = Some(rcv);
         Ok(())
@@ -232,37 +259,35 @@ impl StorageEngine for LSMTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::encoder::Encoder;
     use crate::storage::entry::{Entry as WalEntry, OP_DELETE, OP_SET};
     use crate::storage::wal::WalStorage;
     use std::io;
     use std::sync::{Arc, Mutex};
 
-    /// A WAL mock that records every written entry and replays them on `read_all`.
-    /// The `entries` field is wrapped in an `Arc<Mutex<...>>` so callers can keep
-    /// a clone of the `Arc` after handing ownership of the `RecordingWal` to
-    /// `LSMTree::with_wal`, and still inspect what was written.
+    /// A WAL mock that records raw bytes and replays them on `read_all`.
     #[derive(Default, Clone)]
     struct RecordingWal {
-        entries: Arc<Mutex<Vec<WalEntry>>>,
+        data: Arc<Mutex<Vec<u8>>>,
     }
 
     impl RecordingWal {
         fn new() -> Self {
             Self {
-                entries: Arc::new(Mutex::new(Vec::new())),
+                data: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
 
     #[async_trait::async_trait]
     impl WalStorage for RecordingWal {
-        async fn append(&mut self, entry: &WalEntry) -> io::Result<()> {
-            self.entries.lock().unwrap().push(entry.clone());
+        async fn append(&mut self, data: &[u8]) -> io::Result<()> {
+            self.data.lock().unwrap().extend_from_slice(data);
             Ok(())
         }
 
-        async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
-            Ok(self.entries.lock().unwrap().clone())
+        async fn read_all(&mut self) -> io::Result<Vec<u8>> {
+            Ok(self.data.lock().unwrap().clone())
         }
     }
 
@@ -271,16 +296,26 @@ mod tests {
         LSMTree::with_wal(Box::new(RecordingWal::new())).await
     }
 
-    /// Creates a tree **and** returns a handle to the shared WAL entries so
+    /// Creates a tree **and** returns a handle to the shared WAL bytes so
     /// tests can inspect what was written even after ownership moved into the tree.
-    async fn make_tree_with_wal_spy() -> (LSMTree, Arc<Mutex<Vec<WalEntry>>>) {
+    async fn make_tree_with_wal_spy() -> (LSMTree, Arc<Mutex<Vec<u8>>>) {
         let wal = RecordingWal::new();
-        let spy = Arc::clone(&wal.entries);
+        let spy = Arc::clone(&wal.data);
         (LSMTree::with_wal(Box::new(wal)).await, spy)
     }
 
-    fn recorded(spy: &Arc<Mutex<Vec<WalEntry>>>) -> Vec<WalEntry> {
-        spy.lock().unwrap().clone()
+    fn recorded(spy: &Arc<Mutex<Vec<u8>>>) -> Vec<WalEntry> {
+        let data = spy.lock().unwrap().clone();
+        Encoder::decode_all(&data).unwrap()
+    }
+
+    /// Helper: encode a list of entries into WAL bytes for pre-populating a mock WAL.
+    fn encode_entries(entries: &[WalEntry]) -> Vec<u8> {
+        let mut data = Vec::new();
+        for entry in entries {
+            data.extend_from_slice(&Encoder::encode(entry));
+        }
+        data
     }
 
     // ── get ──────────────────────────────────────────────────────────────────
@@ -435,7 +470,7 @@ mod tests {
     async fn test_recover_replays_set_entries() {
         let wal = RecordingWal::new();
         // Pre-populate the WAL as if a previous run wrote these entries.
-        wal.entries.lock().unwrap().extend([
+        *wal.data.lock().unwrap() = encode_entries(&[
             WalEntry::set(1, b"k1".to_vec(), b"v1".to_vec()),
             WalEntry::set(2, b"k2".to_vec(), b"v2".to_vec()),
         ]);
@@ -460,7 +495,7 @@ mod tests {
     #[tokio::test]
     async fn test_recover_replays_tombstone_hides_key() {
         let wal = RecordingWal::new();
-        wal.entries.lock().unwrap().extend([
+        *wal.data.lock().unwrap() = encode_entries(&[
             WalEntry::set(1, b"k".to_vec(), b"v".to_vec()),
             WalEntry::delete(2, b"k".to_vec()),
         ]);
@@ -477,7 +512,7 @@ mod tests {
     async fn test_recover_tombstone_logical_index_matches_wal_entry() {
         // On recovery, the tombstone's logical_index must equal the WAL entry's raft index.
         let wal = RecordingWal::new();
-        wal.entries.lock().unwrap().extend([
+        *wal.data.lock().unwrap() = encode_entries(&[
             WalEntry::set(1, b"k".to_vec(), b"v".to_vec()),
             WalEntry::delete(4, b"k".to_vec()), // non-contiguous raft index
         ]);
@@ -492,7 +527,7 @@ mod tests {
     #[tokio::test]
     async fn test_recover_last_set_wins_over_earlier_set() {
         let wal = RecordingWal::new();
-        wal.entries.lock().unwrap().extend([
+        *wal.data.lock().unwrap() = encode_entries(&[
             WalEntry::set(1, b"k".to_vec(), b"v1".to_vec()),
             WalEntry::set(2, b"k".to_vec(), b"v2".to_vec()),
         ]);
@@ -510,7 +545,7 @@ mod tests {
     #[tokio::test]
     async fn test_recover_set_after_tombstone_is_visible() {
         let wal = RecordingWal::new();
-        wal.entries.lock().unwrap().extend([
+        *wal.data.lock().unwrap() = encode_entries(&[
             WalEntry::set(1, b"k".to_vec(), b"v1".to_vec()),
             WalEntry::delete(2, b"k".to_vec()),
             WalEntry::set(3, b"k".to_vec(), b"v2".to_vec()),
@@ -585,7 +620,7 @@ mod tests {
         // Recover WAL entries with raft indices 1,2,3 then write new entries
         // with raft indices 4,5 — the LSM stores whatever index the caller provides.
         let wal = RecordingWal::new();
-        wal.entries.lock().unwrap().extend([
+        *wal.data.lock().unwrap() = encode_entries(&[
             WalEntry::set(1, b"k1".to_vec(), b"v1".to_vec()),
             WalEntry::set(2, b"k2".to_vec(), b"v2".to_vec()),
             WalEntry::delete(3, b"k1".to_vec()),
@@ -616,11 +651,11 @@ mod tests {
     async fn test_wal_index_matches_raft_index_after_recover_then_new_writes() {
         // Verify WAL entries carry the exact raft index passed by the caller.
         let wal = RecordingWal::new();
-        wal.entries.lock().unwrap().extend([
+        *wal.data.lock().unwrap() = encode_entries(&[
             WalEntry::set(1, b"k1".to_vec(), b"v1".to_vec()),
             WalEntry::set(2, b"k2".to_vec(), b"v2".to_vec()),
         ]);
-        let spy = Arc::clone(&wal.entries);
+        let spy = Arc::clone(&wal.data);
         let mut tree = LSMTree::with_wal(Box::new(wal)).await;
         _ = tree.recover().await;
 
