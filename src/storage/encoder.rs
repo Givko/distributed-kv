@@ -74,7 +74,7 @@ impl Encoder {
     }
 
     // Returns the number of bytes written
-    pub(super) fn encode_into(entry: &Entry, bytes: &mut Vec<u8>) -> u32 {
+    pub(super) fn encode_into(entry: &Entry, bytes: &mut Vec<u8>) -> usize {
         let key_len = entry.key.len() as u32;
         let value_len = entry.value.len() as u32;
         let index = entry.index.to_be_bytes();
@@ -93,7 +93,7 @@ impl Encoder {
         bytes.extend_from_slice(&value_len_bytes);
         bytes.extend_from_slice(value);
 
-        bytes.len() as u32
+        bytes.len()
     }
 
     pub fn decode_all(data: &[u8]) -> io::Result<Vec<Entry>> {
