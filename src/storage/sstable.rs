@@ -133,14 +133,6 @@ impl SSTablesStorage for SSTableStorageManager {
                 continue; // Skip files that cannot contain the key
             }
 
-            // Get starting offset via the sparse index
-            // start linear search from that offset until the end
-            // we should not stop at the first key match because we might have the key mutliple times
-            // se we stop it we have found the last matching key i.e. if nextKey != key return value
-            // we can jump by len as the first 8 bytes are the len of the record if the key is not
-            // what we are looking for we can jump forward by len - cur_read bytes. Also use borrows to avoid
-            // data copy. If we find the key stop if not continue to the next sstable file and the same
-
             let mut starting_offset = 0;
             let sparse_index: Vec<(Vec<u8>, u64)> = match OpenOptions::new()
                 .read(true)
@@ -211,13 +203,20 @@ impl SSTablesStorage for SSTableStorageManager {
                 }
             };
 
-            match file.seek(tokio::io::SeekFrom::Start(starting_offset)).await {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("Failed to seek in SSTable file: {}", e);
-                    return Err(e);
-                }
-            };
+            //let bytes = match file
+            //    .seek(tokio::io::SeekFrom::Start(starting_offset - 1))
+            //    .await
+            //{
+            //    Ok(b) => b,
+            //    Err(e) => {
+            //        eprintln!("Failed to seek in SSTable file: {}", e);
+            //        return Err(e);
+            //    }
+            //};
+            //eprintln!(
+            //    "Seeked to offset {} in SSTable file: {}, bytes seeked: {}",
+            //    starting_offset, metadata.file_path, bytes
+            //);
 
             let mut buf = Vec::new();
             let read_bytes = match file.read_to_end(&mut buf).await {
@@ -227,10 +226,19 @@ impl SSTablesStorage for SSTableStorageManager {
                     return Err(e);
                 }
             };
+            eprintln!(
+                "read {} bytes from SSTable file: {}",
+                read_bytes, metadata.file_path
+            );
 
             //We should et value while decoding when we hit the last key occurence
             //to avoid looping over the entries again
             let decoded = Encoder::decode_all(&buf[..read_bytes])?;
+            eprintln!(
+                "Decoded {} entries from SSTable file: {}",
+                decoded.len(),
+                metadata.file_path
+            );
             for entry in decoded {
                 if entry.key.as_slice() == key {
                     return Ok(Some(entry.value.clone()));

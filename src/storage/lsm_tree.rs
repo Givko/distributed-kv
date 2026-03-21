@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot::error::TryRecvError;
 
-const FLUSH_THRESHOLD_BYTES: usize = 1024; // 1 MB
+const FLUSH_THRESHOLD_BYTES: usize = 500; // 1 MB
 const FLUSH_WAL_PATH: &str = "wal.log.tmp";
 const WALL_FILE_PATH: &str = "wal.log";
 const SPARSE_INDEX_INTERVAL: usize = 2;
