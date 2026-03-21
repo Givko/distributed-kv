@@ -3,10 +3,10 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
-use tokio::fs::OpenOptions;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use std::sync::Arc;
 
 use crate::storage::encoder::Encoder;
+use crate::storage::fs::FileSystem;
 
 #[async_trait::async_trait]
 pub(super) trait SSTablesStorage {
@@ -45,12 +45,12 @@ pub(super) struct Metadata {
 
 pub(super) struct SSTableStorageManager {
     metadata: Metadata,
+    fs: Arc<dyn FileSystem>,
 }
 
 impl SSTableStorageManager {
-    pub(super) async fn new() -> Self {
-        //TODO: Load existing metadata from disk if available
-        let metadata = match OpenOptions::new().read(true).open("metadata.dat").await {
+    pub(super) async fn new(fs: Arc<dyn FileSystem>) -> Self {
+        let metadata = match fs.open_read("metadata.dat").await {
             Ok(mut file) => {
                 let mut buffer = Vec::new();
                 if let Err(e) = file.read_to_end(&mut buffer).await {
@@ -83,21 +83,12 @@ impl SSTableStorageManager {
                 }
             }
         };
-        Self { metadata }
+        Self { metadata, fs }
     }
 
     async fn persist_metadata(&self) -> io::Result<()> {
-        // Implement the logic to persist the metadata to disk
-        // This could involve writing the metadata in a specific format, handling updates, etc.
-        // For simplicity, we can serialize the metadata using a format like JSON or binary and write it to a file.
         let tmp_file_path = "metadata.dat.tmp";
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(tmp_file_path)
-            .await
-            .expect("Failed to open metadata file");
+        let mut file = self.fs.create_or_truncate(tmp_file_path).await?;
 
         // Using json for simplicity, but in a production system, you might want to use a more efficient binary format
         let serialized_state = serde_json::to_string(&self.metadata)?;
@@ -109,7 +100,7 @@ impl SSTableStorageManager {
             eprintln!("Failed to sync metadata file: {}", e);
             return Err(e);
         }
-        if let Err(e) = tokio::fs::rename(tmp_file_path, "metadata.dat").await {
+        if let Err(e) = self.fs.rename(tmp_file_path, "metadata.dat").await {
             eprintln!("Failed to rename metadata file: {}", e);
             return Err(e);
         }
@@ -120,8 +111,6 @@ impl SSTableStorageManager {
 #[async_trait::async_trait]
 impl SSTablesStorage for SSTableStorageManager {
     async fn read(&self, key: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        // Implement the logic to read the value for the given key from the SSTable files
-        // This could involve searching through the SSTable files in order, using the sparse index for faster lookups, etc.
         for metadata in self.metadata.sstable_file_metadata.values() {
             if key < metadata.min_key.as_slice() || key > metadata.max_key.as_slice() {
                 eprintln!(
@@ -130,13 +119,13 @@ impl SSTablesStorage for SSTableStorageManager {
                     String::from_utf8_lossy(&metadata.min_key),
                     String::from_utf8_lossy(&metadata.max_key)
                 );
-                continue; // Skip files that cannot contain the key
+                continue;
             }
 
             let mut starting_offset = 0;
-            let sparse_index: Vec<(Vec<u8>, u64)> = match OpenOptions::new()
-                .read(true)
-                .open(&metadata.sparse_index)
+            let sparse_index: Vec<(Vec<u8>, u64)> = match self
+                .fs
+                .open_read(metadata.sparse_index.to_str().unwrap_or(""))
                 .await
             {
                 Ok(mut file) => {
@@ -194,11 +183,7 @@ impl SSTablesStorage for SSTableStorageManager {
                 metadata.file_path, starting_offset
             );
 
-            let mut file = match OpenOptions::new()
-                .read(true)
-                .open(&metadata.file_path)
-                .await
-            {
+            let mut file = match self.fs.open_read(&metadata.file_path).await {
                 Ok(f) => f,
                 Err(e) => {
                     eprintln!("Failed to open SSTable file: {}", e);
@@ -206,7 +191,7 @@ impl SSTablesStorage for SSTableStorageManager {
                 }
             };
 
-            let bytes = match file.seek(tokio::io::SeekFrom::Start(starting_offset)).await {
+            let bytes = match file.seek(io::SeekFrom::Start(starting_offset)).await {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("Failed to seek in SSTable file: {}", e);
@@ -245,7 +230,7 @@ impl SSTablesStorage for SSTableStorageManager {
                 }
             }
         }
-        Ok(None) // Placeholder implementation
+        Ok(None)
     }
 
     async fn flush(
@@ -268,12 +253,10 @@ impl SSTablesStorage for SSTableStorageManager {
             sparse_index: PathBuf::from(sparse_index_path.clone()),
         };
 
-        // We want truncate so that retres are idempotent
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&path)
+        // We want truncate so that retries are idempotent
+        let mut file = self
+            .fs
+            .create_or_truncate(&path)
             .await
             .expect("Failed to open SSTable file");
         if let Err(e) = file.write_all(data).await {
@@ -285,12 +268,10 @@ impl SSTablesStorage for SSTableStorageManager {
             return Err(e);
         }
 
-        // We want truncate so that retres are idempotent
-        let mut sparse_file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&sparse_index_path)
+        // We want truncate so that retries are idempotent
+        let mut sparse_file = self
+            .fs
+            .create_or_truncate(&sparse_index_path)
             .await
             .expect("Failed to create sparse index file");
 
@@ -317,5 +298,366 @@ impl SSTablesStorage for SSTableStorageManager {
             .insert(Reverse(file_id), sstable_metadata);
         self.persist_metadata().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::entry::Entry;
+    use crate::storage::fs::{FileHandle, FileSystem};
+    use crate::storage::lsm_tree::LSMTree;
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+
+    /// File handle that owns its own buffer — no shared lock during read/write/seek.
+    /// Data is copied from shared storage on open and written back on sync_all.
+    struct InMemoryFileHandle {
+        path: String,
+        storage: Arc<StdMutex<HashMap<String, Vec<u8>>>>,
+        cursor: io::Cursor<Vec<u8>>,
+    }
+
+    #[async_trait::async_trait]
+    impl FileHandle for InMemoryFileHandle {
+        async fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+            std::io::Write::write_all(&mut self.cursor, data)
+        }
+
+        async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+            std::io::Read::read_to_end(&mut self.cursor, buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn sync_all(&mut self) -> io::Result<()> {
+            let mut storage = self.storage.lock().unwrap();
+            storage.insert(self.path.clone(), self.cursor.get_ref().clone());
+            Ok(())
+        }
+
+        async fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+            std::io::Seek::seek(&mut self.cursor, pos)
+        }
+
+        async fn rewind(&mut self) -> io::Result<()> {
+            std::io::Seek::rewind(&mut self.cursor)
+        }
+    }
+
+    struct InMemoryFileSystem {
+        storage: Arc<StdMutex<HashMap<String, Vec<u8>>>>,
+    }
+
+    impl InMemoryFileSystem {
+        fn new() -> Self {
+            Self {
+                storage: Arc::new(StdMutex::new(HashMap::new())),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FileSystem for InMemoryFileSystem {
+        async fn open_read(&self, path: &str) -> io::Result<Box<dyn FileHandle>> {
+            let data = {
+                let storage = self.storage.lock().unwrap();
+                storage
+                    .get(path)
+                    .cloned()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "file not found"))?
+            };
+            Ok(Box::new(InMemoryFileHandle {
+                path: path.to_string(),
+                storage: self.storage.clone(),
+                cursor: io::Cursor::new(data),
+            }))
+        }
+
+        async fn create_or_truncate(&self, path: &str) -> io::Result<Box<dyn FileHandle>> {
+            Ok(Box::new(InMemoryFileHandle {
+                path: path.to_string(),
+                storage: self.storage.clone(),
+                cursor: io::Cursor::new(Vec::new()),
+            }))
+        }
+
+        async fn create_or_append(&self, path: &str) -> io::Result<Box<dyn FileHandle>> {
+            let data = {
+                let storage = self.storage.lock().unwrap();
+                storage.get(path).cloned().unwrap_or_default()
+            };
+            let len = data.len() as u64;
+            let mut cursor = io::Cursor::new(data);
+            cursor.set_position(len);
+            Ok(Box::new(InMemoryFileHandle {
+                path: path.to_string(),
+                storage: self.storage.clone(),
+                cursor,
+            }))
+        }
+
+        async fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+            let mut storage = self.storage.lock().unwrap();
+            let data = storage
+                .remove(from)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "file not found"))?;
+            storage.insert(to.to_string(), data);
+            Ok(())
+        }
+
+        async fn remove_file(&self, path: &str) -> io::Result<()> {
+            let mut storage = self.storage.lock().unwrap();
+            storage.remove(path);
+            Ok(())
+        }
+    }
+
+    async fn make_manager() -> (SSTableStorageManager, Arc<InMemoryFileSystem>) {
+        let fs = Arc::new(InMemoryFileSystem::new());
+        let manager = SSTableStorageManager::new(fs.clone()).await;
+        (manager, fs)
+    }
+
+    async fn flush_entries(manager: &mut SSTableStorageManager, entries: &[Entry]) {
+        let ef = LSMTree::encode_for_flush(entries);
+        manager
+            .flush(&ef.data, &ef.sparse_index, ef.min_key, ef.max_key)
+            .await
+            .expect("flush should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_read_returns_none_when_no_sstables() {
+        let (manager, _) = make_manager().await;
+        assert_eq!(manager.read(b"key").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_read_returns_value_for_existing_key() {
+        let (mut manager, _) = make_manager().await;
+        flush_entries(&mut manager, &[
+            Entry::set(1, b"apple".to_vec(), b"red".to_vec()),
+            Entry::set(2, b"banana".to_vec(), b"yellow".to_vec()),
+            Entry::set(3, b"cherry".to_vec(), b"dark_red".to_vec()),
+        ]).await;
+
+        assert_eq!(manager.read(b"apple").await.unwrap(), Some(b"red".to_vec()));
+        assert_eq!(manager.read(b"banana").await.unwrap(), Some(b"yellow".to_vec()));
+        assert_eq!(manager.read(b"cherry").await.unwrap(), Some(b"dark_red".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_read_returns_none_for_missing_key_in_range() {
+        let (mut manager, _) = make_manager().await;
+        flush_entries(&mut manager, &[
+            Entry::set(1, b"apple".to_vec(), b"red".to_vec()),
+            Entry::set(2, b"cherry".to_vec(), b"dark_red".to_vec()),
+        ]).await;
+
+        assert_eq!(manager.read(b"banana").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_read_skips_sstable_when_key_out_of_range() {
+        let (mut manager, _) = make_manager().await;
+        flush_entries(&mut manager, &[
+            Entry::set(1, b"d".to_vec(), b"v1".to_vec()),
+            Entry::set(2, b"f".to_vec(), b"v2".to_vec()),
+        ]).await;
+
+        assert_eq!(manager.read(b"a").await.unwrap(), None);
+        assert_eq!(manager.read(b"z").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_read_newer_sstable_wins() {
+        let (mut manager, _) = make_manager().await;
+
+        flush_entries(&mut manager, &[
+            Entry::set(1, b"key".to_vec(), b"old_value".to_vec()),
+        ]).await;
+
+        flush_entries(&mut manager, &[
+            Entry::set(2, b"key".to_vec(), b"new_value".to_vec()),
+        ]).await;
+
+        assert_eq!(
+            manager.read(b"key").await.unwrap(),
+            Some(b"new_value".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_key_between_sparse_index_entries() {
+        let (mut manager, _) = make_manager().await;
+        // sparse_index_interval=2: positions 0, 2 are indexed.
+        // "banana" at position 1 must be found by scanning from "apple"'s offset.
+        flush_entries(&mut manager, &[
+            Entry::set(1, b"apple".to_vec(), b"red".to_vec()),
+            Entry::set(2, b"banana".to_vec(), b"yellow".to_vec()),
+            Entry::set(3, b"cherry".to_vec(), b"dark_red".to_vec()),
+        ]).await;
+
+        assert_eq!(
+            manager.read(b"banana").await.unwrap(),
+            Some(b"yellow".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_many_entries_finds_last() {
+        let (mut manager, _) = make_manager().await;
+        flush_entries(&mut manager, &[
+            Entry::set(1, b"a".to_vec(), b"v1".to_vec()),
+            Entry::set(2, b"b".to_vec(), b"v2".to_vec()),
+            Entry::set(3, b"c".to_vec(), b"v3".to_vec()),
+            Entry::set(4, b"d".to_vec(), b"v4".to_vec()),
+            Entry::set(5, b"e".to_vec(), b"v5".to_vec()),
+            Entry::set(6, b"f".to_vec(), b"v6".to_vec()),
+            Entry::set(7, b"g".to_vec(), b"v7".to_vec()),
+        ]).await;
+
+        assert_eq!(manager.read(b"g").await.unwrap(), Some(b"v7".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_read_falls_back_to_older_sstable() {
+        let (mut manager, _) = make_manager().await;
+
+        flush_entries(&mut manager, &[
+            Entry::set(1, b"aaa".to_vec(), b"v1".to_vec()),
+        ]).await;
+
+        flush_entries(&mut manager, &[
+            Entry::set(2, b"zzz".to_vec(), b"v2".to_vec()),
+        ]).await;
+
+        assert_eq!(manager.read(b"aaa").await.unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(manager.read(b"zzz").await.unwrap(), Some(b"v2".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_read_single_entry_sstable() {
+        let (mut manager, _) = make_manager().await;
+        flush_entries(&mut manager, &[
+            Entry::set(1, b"only".to_vec(), b"one".to_vec()),
+        ]).await;
+
+        assert_eq!(manager.read(b"only").await.unwrap(), Some(b"one".to_vec()));
+        assert_eq!(manager.read(b"other").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_flush_creates_sstable_and_index_files() {
+        let (mut manager, fs) = make_manager().await;
+        flush_entries(&mut manager, &[
+            Entry::set(1, b"a".to_vec(), b"v1".to_vec()),
+            Entry::set(2, b"b".to_vec(), b"v2".to_vec()),
+        ]).await;
+
+        let storage = fs.storage.lock().unwrap();
+        assert!(storage.contains_key("sstable_1.dat"));
+        assert!(storage.contains_key("sstable_1.dat.idx"));
+        assert!(storage.contains_key("metadata.dat"));
+    }
+
+    #[tokio::test]
+    async fn test_flush_increments_file_id() {
+        let (mut manager, fs) = make_manager().await;
+        flush_entries(&mut manager, &[
+            Entry::set(1, b"a".to_vec(), b"v1".to_vec()),
+        ]).await;
+        flush_entries(&mut manager, &[
+            Entry::set(2, b"b".to_vec(), b"v2".to_vec()),
+        ]).await;
+
+        let storage = fs.storage.lock().unwrap();
+        assert!(storage.contains_key("sstable_1.dat"));
+        assert!(storage.contains_key("sstable_2.dat"));
+        assert_eq!(manager.metadata.cur_max_file_id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_flush_sstable_data_is_decodable() {
+        let entries = [
+            Entry::set(1, b"key1".to_vec(), b"val1".to_vec()),
+            Entry::set(2, b"key2".to_vec(), b"val2".to_vec()),
+        ];
+        let (mut manager, fs) = make_manager().await;
+        flush_entries(&mut manager, &entries).await;
+
+        let data = {
+            let storage = fs.storage.lock().unwrap();
+            storage.get("sstable_1.dat").unwrap().clone()
+        };
+        let decoded = Encoder::decode_all(&data).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].key, b"key1");
+        assert_eq!(decoded[0].value, b"val1");
+        assert_eq!(decoded[1].key, b"key2");
+        assert_eq!(decoded[1].value, b"val2");
+    }
+
+    #[tokio::test]
+    async fn test_flush_sparse_index_is_deserializable() {
+        let entries = [
+            Entry::set(1, b"a".to_vec(), b"v1".to_vec()),
+            Entry::set(2, b"b".to_vec(), b"v2".to_vec()),
+            Entry::set(3, b"c".to_vec(), b"v3".to_vec()),
+        ];
+        let (mut manager, fs) = make_manager().await;
+        flush_entries(&mut manager, &entries).await;
+
+        let idx_data = {
+            let storage = fs.storage.lock().unwrap();
+            storage.get("sstable_1.dat.idx").unwrap().clone()
+        };
+        let sparse_index: Vec<(Vec<u8>, u64)> = serde_json::from_slice(&idx_data).unwrap();
+        // SPARSE_INDEX_INTERVAL=2: positions 0 and 2 are indexed
+        assert_eq!(sparse_index.len(), 2);
+        assert_eq!(sparse_index[0].0, b"a");
+        assert_eq!(sparse_index[0].1, 0);
+        assert_eq!(sparse_index[1].0, b"c");
+    }
+
+    #[tokio::test]
+    async fn test_flush_stores_min_max_keys_in_metadata() {
+        let (mut manager, _) = make_manager().await;
+        flush_entries(&mut manager, &[
+            Entry::set(1, b"apple".to_vec(), b"v1".to_vec()),
+            Entry::set(2, b"cherry".to_vec(), b"v2".to_vec()),
+        ]).await;
+
+        let meta = manager.metadata.sstable_file_metadata.values().next().unwrap();
+        assert_eq!(meta.min_key, b"apple");
+        assert_eq!(meta.max_key, b"cherry");
+    }
+
+    #[tokio::test]
+    async fn test_flush_metadata_persisted_and_recoverable() {
+        let (mut manager, fs) = make_manager().await;
+        flush_entries(&mut manager, &[
+            Entry::set(1, b"key".to_vec(), b"val".to_vec()),
+        ]).await;
+
+        // Create a new manager from the same filesystem — it should recover metadata
+        let recovered = SSTableStorageManager::new(fs.clone()).await;
+        assert_eq!(recovered.metadata.cur_max_file_id, 1);
+        assert_eq!(recovered.metadata.sstable_file_metadata.len(), 1);
+        assert_eq!(recovered.read(b"key").await.unwrap(), Some(b"val".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_flush_records_size_in_bytes() {
+        let entries = [Entry::set(1, b"k".to_vec(), b"v".to_vec())];
+        let ef = LSMTree::encode_for_flush(&entries);
+        let (mut manager, _) = make_manager().await;
+        flush_entries(&mut manager, &entries).await;
+
+        let meta = manager.metadata.sstable_file_metadata.values().next().unwrap();
+        assert_eq!(meta.size_in_bytes, ef.data.len() as u64);
     }
 }

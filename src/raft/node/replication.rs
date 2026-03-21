@@ -201,6 +201,18 @@ mod tests {
         async fn read_all(&mut self) -> io::Result<Vec<u8>> {
             Ok(vec![])
         }
+
+        async fn rotate(&mut self, _flush_path: &str) -> io::Result<Box<dyn WalStorage + Send + Sync>> {
+            Ok(Box::new(MockWal))
+        }
+
+        async fn open_read(&self, _path: &str) -> io::Result<Box<dyn WalStorage + Send + Sync>> {
+            Err(io::Error::new(io::ErrorKind::NotFound, "not found"))
+        }
+
+        async fn remove(&self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     struct LSMTree;

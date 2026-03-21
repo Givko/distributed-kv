@@ -1,12 +1,10 @@
-use tokio::fs::OpenOptions;
-
 use crate::raft::state_machine::{GetResult, StorageEngine};
 use crate::storage::encoder::Encoder;
 use crate::storage::entry::Entry;
+use crate::storage::fs::TokioFileSystem;
 use crate::storage::memtable::{BTreeMapMemTable, MemTable, MemTableEntry};
 use crate::storage::sstable::{SSTableStorageManager, SSTablesStorage};
 use crate::storage::wal::{Wal, WalStorage};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot::error::TryRecvError;
@@ -16,11 +14,11 @@ const FLUSH_WAL_PATH: &str = "wal.log.tmp";
 const WALL_FILE_PATH: &str = "wal.log";
 const SPARSE_INDEX_INTERVAL: usize = 2;
 
-struct EncodedFlush {
-    data: Vec<u8>,
-    sparse_index: Vec<(Vec<u8>, u64)>,
-    min_key: Vec<u8>,
-    max_key: Vec<u8>,
+pub(super) struct EncodedFlush {
+    pub(super) data: Vec<u8>,
+    pub(super) sparse_index: Vec<(Vec<u8>, u64)>,
+    pub(super) min_key: Vec<u8>,
+    pub(super) max_key: Vec<u8>,
 }
 
 pub struct LSMTree {
@@ -35,14 +33,12 @@ pub struct LSMTree {
 
 impl LSMTree {
     pub async fn new() -> Self {
-        Self::with_wal(Box::new(Wal::new(PathBuf::from("wal.log")).await)).await
-    }
-
-    pub async fn with_wal(wal: Box<dyn WalStorage + Sync + Send>) -> Self {
+        let fs = Arc::new(TokioFileSystem);
+        let wal = Box::new(Wal::new(WALL_FILE_PATH, fs.clone()).await);
         LSMTree {
             memtable: Box::new(BTreeMapMemTable::new()),
             wal,
-            sstable_manager: Arc::new(Mutex::new(SSTableStorageManager::new().await)),
+            sstable_manager: Arc::new(Mutex::new(SSTableStorageManager::new(fs).await)),
 
             flushing_memtable: None,
             flushing_wal: None,
@@ -50,7 +46,20 @@ impl LSMTree {
         }
     }
 
-    fn encode_for_flush(entries: &[Entry]) -> EncodedFlush {
+    pub async fn with_wal(wal: Box<dyn WalStorage + Sync + Send>) -> Self {
+        let fs = Arc::new(TokioFileSystem);
+        LSMTree {
+            memtable: Box::new(BTreeMapMemTable::new()),
+            wal,
+            sstable_manager: Arc::new(Mutex::new(SSTableStorageManager::new(fs).await)),
+
+            flushing_memtable: None,
+            flushing_wal: None,
+            flush_finished: None,
+        }
+    }
+
+    pub(super) fn encode_for_flush(entries: &[Entry]) -> EncodedFlush {
         let mut data = Vec::new();
         let mut sparse_index: Vec<(Vec<u8>, u64)> = Vec::new();
         let min_key = entries.first().map(|e| e.key.clone()).unwrap_or_default();
@@ -74,14 +83,7 @@ impl LSMTree {
     }
 
     async fn flush(&mut self) -> anyhow::Result<()> {
-        // rename old WAL as flushing to be able to locate it on recovery if flush fails
-        let file_path = WALL_FILE_PATH;
-        let tmp_file_path = FLUSH_WAL_PATH;
-        tokio::fs::rename(file_path, tmp_file_path).await?;
-
-        //Save old memtable and wal for recovery if flush fails
-        let new_wal_path = PathBuf::from(file_path);
-        let new_wal = Box::new(Wal::new(new_wal_path).await); // Start a new WAL file for the new memtable
+        let new_wal = self.wal.rotate(FLUSH_WAL_PATH).await?;
 
         self.flushing_memtable = Some(std::mem::replace(
             &mut self.memtable,
@@ -99,7 +101,6 @@ impl LSMTree {
             ef.sparse_index,
             ef.min_key,
             ef.max_key,
-            tmp_file_path.to_string(),
         )
         .await;
 
@@ -113,7 +114,6 @@ impl LSMTree {
         sparse_index: Vec<(Vec<u8>, u64)>,
         min_key: Vec<u8>,
         max_key: Vec<u8>,
-        tmp_file_path: String,
     ) {
         let sstable_manager = self.sstable_manager.clone();
         tokio::spawn(async move {
@@ -126,16 +126,6 @@ impl LSMTree {
                 notification_channel
                     .send(false)
                     .expect("Failed to send flush completion signal");
-                return;
-            }
-
-            // Clean up the flushing memtable and WAL after the flush is complete
-            if let Err(e) = tokio::fs::remove_file(&tmp_file_path).await {
-                eprintln!("Failed to delete flushing WAL file: {e}");
-                notification_channel
-                    .send(false)
-                    .expect("Failed to send flush completion signal");
-
                 return;
             }
 
@@ -152,11 +142,14 @@ impl LSMTree {
 
         match rcv.try_recv() {
             Ok(success) => {
-                self.flush_finished.take(); // Clear the receiver after handling the result
+                self.flush_finished.take();
                 if success {
-                    // Flush succeeded, clean up flushing memtable and WAL
                     self.flushing_memtable.take();
-                    self.flushing_wal.take();
+                    if let Some(flushing_wal) = self.flushing_wal.take() {
+                        if let Err(e) = flushing_wal.remove().await {
+                            eprintln!("Failed to delete flushing WAL file: {e}");
+                        }
+                    }
                 } else {
                     eprintln!("Flush task reported failure");
 
@@ -171,7 +164,7 @@ impl LSMTree {
             }
             Err(TryRecvError::Closed) => {
                 eprintln!("Failed to receive flush completion signal: channel closed");
-                self.flush_finished.take(); // Clear the receiver on error to avoid future attempts
+                self.flush_finished.take();
                 self.flushing_memtable.take();
                 self.flushing_wal.take();
             }
@@ -182,7 +175,7 @@ impl LSMTree {
 #[async_trait::async_trait]
 impl StorageEngine for LSMTree {
     async fn get(&mut self, key: &[u8]) -> GetResult {
-        self.clean_flush_state().await; // Check if any flush has completed and clean up state accordingly before processing the get
+        self.clean_flush_state().await;
         let entry = self
             .memtable
             .get(key)
@@ -206,8 +199,6 @@ impl StorageEngine for LSMTree {
             res
         );
         if res == GetResult::NotFound {
-            // If not found in memtable or flushing memtable, check SSTables
-
             eprintln!(
                 "Key: {} not found in memtable or flushing memtable, checking SSTables",
                 String::from_utf8_lossy(key)
@@ -218,7 +209,7 @@ impl StorageEngine for LSMTree {
                 Ok(None) => GetResult::NotFound,
                 Err(e) => {
                     eprintln!("Failed to read from SSTables: {e}");
-                    GetResult::NotFound // Treat read errors as not found for now
+                    GetResult::NotFound
                 }
             };
             eprintln!(
@@ -246,7 +237,7 @@ impl StorageEngine for LSMTree {
             .await
             .expect("Failed to write to WAL");
         self.memtable.set(raft_index, key, value);
-        self.clean_flush_state().await; // Check if any flush has completed and clean up state accordingly after processing the set
+        self.clean_flush_state().await;
         if self.memtable.size_in_bytes() >= FLUSH_THRESHOLD_BYTES && self.flush_finished.is_none() {
             self.flush().await.expect("Failed to flush memtable");
         }
@@ -260,7 +251,7 @@ impl StorageEngine for LSMTree {
             .await
             .expect("Failed to write to WAL");
         self.memtable.delete(raft_index, key);
-        self.clean_flush_state().await; // Check if any flush has completed and clean up state accordingly after processing the set
+        self.clean_flush_state().await;
         if self.memtable.size_in_bytes() >= FLUSH_THRESHOLD_BYTES && self.flush_finished.is_none() {
             self.flush().await.expect("Failed to flush memtable");
         }
@@ -281,11 +272,10 @@ impl StorageEngine for LSMTree {
         // try and open the flushing WAL if it exists and replay it as well,
         //since the flush might have failed after WAL rotation but before
         //the old WAL was deleted
-        let file_result = OpenOptions::new().read(true).open(FLUSH_WAL_PATH).await;
-        let flush_wal = match file_result {
+        let mut flushing_wal = match self.wal.open_read(FLUSH_WAL_PATH).await {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(()); // No flushing WAL, nothing more to recover
+                return Ok(());
             }
             Err(e) => {
                 eprintln!("Failed to open flushing WAL during recovery: {e}");
@@ -293,16 +283,8 @@ impl StorageEngine for LSMTree {
             }
         };
 
-        let flushing_wal = Box::new(Wal::from_file(flush_wal));
-        self.flushing_wal = Some(flushing_wal);
-        self.flushing_memtable = Some(Box::new(BTreeMapMemTable::new())); // Start with a fresh memtable for the new WAL
-        match self
-            .flushing_wal
-            .as_mut()
-            .expect("Flushing WAL should exist")
-            .read_all()
-            .await
-        {
+        self.flushing_memtable = Some(Box::new(BTreeMapMemTable::new()));
+        match flushing_wal.read_all().await {
             Ok(data) => {
                 let entries = Encoder::decode_all(&data)?;
                 self.flushing_memtable
@@ -315,6 +297,7 @@ impl StorageEngine for LSMTree {
                 return Err(anyhow::anyhow!(e));
             }
         }
+        self.flushing_wal = Some(flushing_wal);
 
         let old_entries = self
             .flushing_memtable
@@ -329,7 +312,6 @@ impl StorageEngine for LSMTree {
             ef.sparse_index,
             ef.min_key,
             ef.max_key,
-            FLUSH_WAL_PATH.to_string(),
         )
         .await;
         self.flush_finished = Some(rcv);
@@ -370,6 +352,18 @@ mod tests {
 
         async fn read_all(&mut self) -> io::Result<Vec<u8>> {
             Ok(self.data.lock().unwrap().clone())
+        }
+
+        async fn rotate(&mut self, _flush_path: &str) -> io::Result<Box<dyn WalStorage + Send + Sync>> {
+            Ok(Box::new(RecordingWal::new()))
+        }
+
+        async fn open_read(&self, _path: &str) -> io::Result<Box<dyn WalStorage + Send + Sync>> {
+            Err(io::Error::new(io::ErrorKind::NotFound, "not found"))
+        }
+
+        async fn remove(&self) -> io::Result<()> {
+            Ok(())
         }
     }
 
@@ -431,8 +425,8 @@ mod tests {
         tree.set(1, b"key".to_vec(), b"val".to_vec()).await;
         let entries = recorded(&spy);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].index, 1); // raft index passed through to WAL
-        assert_eq!(entries[0].op, OP_SET); // op = SET
+        assert_eq!(entries[0].index, 1);
+        assert_eq!(entries[0].op, OP_SET);
         assert_eq!(entries[0].key, b"key");
         assert_eq!(entries[0].value, b"val");
     }
@@ -471,22 +465,19 @@ mod tests {
         let mut tree = make_tree().await;
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
         tree.delete(2, b"k").await;
-        // Deleted key has a tombstone — distinguishable from a never-set key.
         assert_eq!(tree.get(b"k").await, GetResult::Tombstone);
     }
 
     #[tokio::test]
     async fn test_tombstone_carries_raft_index_from_delete() {
-        // The logical_index on a tombstone must equal the raft index passed to delete.
         let mut tree = make_tree().await;
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
-        tree.delete(5, b"k").await; // non-contiguous raft index
+        tree.delete(5, b"k").await;
         assert_eq!(tree.get(b"k").await, GetResult::Tombstone);
     }
 
     #[tokio::test]
     async fn test_tombstone_logical_index_updated_on_redelete() {
-        // Deleting the same key twice: the second tombstone carries the higher index.
         let mut tree = make_tree().await;
         tree.set(1, b"k".to_vec(), b"v".to_vec()).await;
         tree.delete(2, b"k").await;
@@ -496,7 +487,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_tombstone_on_never_set_key_carries_raft_index() {
-        // Deleting a key that was never set still stores a tombstone with the correct index.
         let mut tree = make_tree().await;
         tree.delete(7, b"ghost").await;
         assert_eq!(tree.get(b"ghost").await, GetResult::Tombstone);
@@ -509,9 +499,9 @@ mod tests {
         tree.delete(2, b"k").await;
         let entries = recorded(&spy);
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].index, 1); // set got raft index 1
-        assert_eq!(entries[1].index, 2); // delete got raft index 2
-        assert_eq!(entries[1].op, OP_DELETE); // op = DELETE
+        assert_eq!(entries[0].index, 1);
+        assert_eq!(entries[1].index, 2);
+        assert_eq!(entries[1].op, OP_DELETE);
         assert_eq!(entries[1].key, b"k");
         assert_eq!(entries[1].value, b"");
     }
@@ -521,7 +511,6 @@ mod tests {
     #[tokio::test]
     async fn test_recover_replays_set_entries() {
         let wal = RecordingWal::new();
-        // Pre-populate the WAL as if a previous run wrote these entries.
         *wal.data.lock().unwrap() = encode_entries(&[
             WalEntry::set(1, b"k1".to_vec(), b"v1".to_vec()),
             WalEntry::set(2, b"k2".to_vec(), b"v2".to_vec()),
@@ -541,17 +530,15 @@ mod tests {
         ]);
         let mut tree = LSMTree::with_wal(Box::new(wal)).await;
         _ = tree.recover().await;
-        // After recovery the key carries a tombstone, not a value and not absent.
         assert_eq!(tree.get(b"k").await, GetResult::Tombstone);
     }
 
     #[tokio::test]
     async fn test_recover_tombstone_logical_index_matches_wal_entry() {
-        // On recovery, the tombstone's logical_index must equal the WAL entry's raft index.
         let wal = RecordingWal::new();
         *wal.data.lock().unwrap() = encode_entries(&[
             WalEntry::set(1, b"k".to_vec(), b"v".to_vec()),
-            WalEntry::delete(4, b"k".to_vec()), // non-contiguous raft index
+            WalEntry::delete(4, b"k".to_vec()),
         ]);
         let mut tree = LSMTree::with_wal(Box::new(wal)).await;
         _ = tree.recover().await;
@@ -605,7 +592,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_logical_index_after_interleaved_set_delete_set() {
-        // Live write path: set→delete→set, final value carries raft index 3.
         let mut tree = make_tree().await;
         tree.set(1, b"k".to_vec(), b"v1".to_vec()).await;
         tree.delete(2, b"k").await;
@@ -615,8 +601,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_logical_index_preserved_after_recover_then_new_writes() {
-        // Recover WAL entries with raft indices 1,2,3 then write new entries
-        // with raft indices 4,5 — the LSM stores whatever index the caller provides.
         let wal = RecordingWal::new();
         *wal.data.lock().unwrap() = encode_entries(&[
             WalEntry::set(1, b"k1".to_vec(), b"v1".to_vec()),
@@ -635,7 +619,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_wal_index_matches_raft_index_after_recover_then_new_writes() {
-        // Verify WAL entries carry the exact raft index passed by the caller.
         let wal = RecordingWal::new();
         *wal.data.lock().unwrap() = encode_entries(&[
             WalEntry::set(1, b"k1".to_vec(), b"v1".to_vec()),
@@ -648,8 +631,8 @@ mod tests {
         tree.set(3, b"k3".to_vec(), b"v3".to_vec()).await;
         tree.delete(4, b"k1").await;
         let entries = recorded(&spy);
-        assert_eq!(entries[2].index, 3); // new set with raft index 3
-        assert_eq!(entries[3].index, 4); // new delete with raft index 4
+        assert_eq!(entries[2].index, 3);
+        assert_eq!(entries[3].index, 4);
     }
 
     // ── encode_for_flush sparse index offsets ───────────────────────────────
@@ -666,13 +649,11 @@ mod tests {
 
         let ef = LSMTree::encode_for_flush(&entries);
 
-        // With SPARSE_INDEX_INTERVAL=2, entries at positions 0, 2, 4 are indexed
         assert_eq!(ef.sparse_index.len(), 3);
         assert_eq!(ef.sparse_index[0].0, b"a");
         assert_eq!(ef.sparse_index[1].0, b"c");
         assert_eq!(ef.sparse_index[2].0, b"e");
 
-        // Each offset should decode to the correct entry when used as a starting position
         for (sparse_key, offset) in &ef.sparse_index {
             let slice = &ef.data[*offset as usize..];
             let decoded = Encoder::decode_all(slice).unwrap();
@@ -697,24 +678,20 @@ mod tests {
 
     #[test]
     fn test_sparse_index_offsets_with_variable_size_entries() {
-        // Use entries with very different sizes to catch cumulative vs incremental bugs
         let entries = vec![
-            WalEntry::set(1, b"k".to_vec(), b"v".to_vec()),             // small
-            WalEntry::set(2, b"k2".to_vec(), b"value2".to_vec()),       // medium
-            WalEntry::set(3, b"key3".to_vec(), b"a]long_value_here".to_vec()), // large
-            WalEntry::set(4, b"k4".to_vec(), b"v4".to_vec()),           // small again
+            WalEntry::set(1, b"k".to_vec(), b"v".to_vec()),
+            WalEntry::set(2, b"k2".to_vec(), b"value2".to_vec()),
+            WalEntry::set(3, b"key3".to_vec(), b"a]long_value_here".to_vec()),
+            WalEntry::set(4, b"k4".to_vec(), b"v4".to_vec()),
         ];
 
         let ef = LSMTree::encode_for_flush(&entries);
 
-        // With SPARSE_INDEX_INTERVAL=2, indexed at positions 0 and 2
         assert_eq!(ef.sparse_index.len(), 2);
 
-        // Verify offset[0] points to entries[0]
         let decoded_from_0 = Encoder::decode_all(&ef.data[ef.sparse_index[0].1 as usize..]).unwrap();
         assert_eq!(decoded_from_0[0].key, b"k");
 
-        // Verify offset[1] points to entries[2], not somewhere wrong
         let decoded_from_1 = Encoder::decode_all(&ef.data[ef.sparse_index[1].1 as usize..]).unwrap();
         assert_eq!(decoded_from_1[0].key, b"key3");
     }
