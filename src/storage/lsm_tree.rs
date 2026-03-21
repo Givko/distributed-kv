@@ -95,14 +95,8 @@ impl LSMTree {
         let ef = Self::encode_for_flush(&old_entries);
         let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
         self.flush_finished = Some(rcv);
-        self.spawn_flush_task(
-            snd,
-            ef.data,
-            ef.sparse_index,
-            ef.min_key,
-            ef.max_key,
-        )
-        .await;
+        self.spawn_flush_task(snd, ef.data, ef.sparse_index, ef.min_key, ef.max_key)
+            .await;
 
         Ok(())
     }
@@ -145,10 +139,10 @@ impl LSMTree {
                 self.flush_finished.take();
                 if success {
                     self.flushing_memtable.take();
-                    if let Some(flushing_wal) = self.flushing_wal.take() {
-                        if let Err(e) = flushing_wal.remove().await {
-                            eprintln!("Failed to delete flushing WAL file: {e}");
-                        }
+                    if let Some(flushing_wal) = self.flushing_wal.take()
+                        && let Err(e) = flushing_wal.remove().await
+                    {
+                        eprintln!("Failed to delete flushing WAL file: {e}");
                     }
                 } else {
                     eprintln!("Flush task reported failure");
@@ -306,14 +300,8 @@ impl StorageEngine for LSMTree {
             .to_entries();
         let ef = Self::encode_for_flush(&old_entries);
         let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
-        self.spawn_flush_task(
-            snd,
-            ef.data,
-            ef.sparse_index,
-            ef.min_key,
-            ef.max_key,
-        )
-        .await;
+        self.spawn_flush_task(snd, ef.data, ef.sparse_index, ef.min_key, ef.max_key)
+            .await;
         self.flush_finished = Some(rcv);
         Ok(())
     }
@@ -354,7 +342,10 @@ mod tests {
             Ok(self.data.lock().unwrap().clone())
         }
 
-        async fn rotate(&mut self, _flush_path: &str) -> io::Result<Box<dyn WalStorage + Send + Sync>> {
+        async fn rotate(
+            &mut self,
+            _flush_path: &str,
+        ) -> io::Result<Box<dyn WalStorage + Send + Sync>> {
             Ok(Box::new(RecordingWal::new()))
         }
 
@@ -658,7 +649,8 @@ mod tests {
             let slice = &ef.data[*offset as usize..];
             let decoded = Encoder::decode_all(slice).unwrap();
             assert_eq!(
-                &decoded[0].key, sparse_key,
+                &decoded[0].key,
+                sparse_key,
                 "sparse index offset {} should point to entry with key {:?}",
                 offset,
                 String::from_utf8_lossy(sparse_key)
@@ -668,12 +660,13 @@ mod tests {
 
     #[test]
     fn test_sparse_index_first_offset_is_zero() {
-        let entries = vec![
-            WalEntry::set(1, b"x".to_vec(), b"y".to_vec()),
-        ];
+        let entries = vec![WalEntry::set(1, b"x".to_vec(), b"y".to_vec())];
         let ef = LSMTree::encode_for_flush(&entries);
         assert_eq!(ef.sparse_index.len(), 1);
-        assert_eq!(ef.sparse_index[0].1, 0, "first sparse index offset must be 0");
+        assert_eq!(
+            ef.sparse_index[0].1, 0,
+            "first sparse index offset must be 0"
+        );
     }
 
     #[test]
@@ -689,10 +682,12 @@ mod tests {
 
         assert_eq!(ef.sparse_index.len(), 2);
 
-        let decoded_from_0 = Encoder::decode_all(&ef.data[ef.sparse_index[0].1 as usize..]).unwrap();
+        let decoded_from_0 =
+            Encoder::decode_all(&ef.data[ef.sparse_index[0].1 as usize..]).unwrap();
         assert_eq!(decoded_from_0[0].key, b"k");
 
-        let decoded_from_1 = Encoder::decode_all(&ef.data[ef.sparse_index[1].1 as usize..]).unwrap();
+        let decoded_from_1 =
+            Encoder::decode_all(&ef.data[ef.sparse_index[1].1 as usize..]).unwrap();
         assert_eq!(decoded_from_1[0].key, b"key3");
     }
 }
