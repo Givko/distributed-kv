@@ -651,4 +651,71 @@ mod tests {
         assert_eq!(entries[2].index, 3); // new set with raft index 3
         assert_eq!(entries[3].index, 4); // new delete with raft index 4
     }
+
+    // ── encode_for_flush sparse index offsets ───────────────────────────────
+
+    #[test]
+    fn test_sparse_index_offsets_point_to_correct_entries() {
+        let entries = vec![
+            WalEntry::set(1, b"a".to_vec(), b"val_a".to_vec()),
+            WalEntry::set(2, b"b".to_vec(), b"val_b".to_vec()),
+            WalEntry::set(3, b"c".to_vec(), b"val_cc".to_vec()),
+            WalEntry::set(4, b"d".to_vec(), b"val_ddd".to_vec()),
+            WalEntry::set(5, b"e".to_vec(), b"val_eeee".to_vec()),
+        ];
+
+        let ef = LSMTree::encode_for_flush(&entries);
+
+        // With SPARSE_INDEX_INTERVAL=2, entries at positions 0, 2, 4 are indexed
+        assert_eq!(ef.sparse_index.len(), 3);
+        assert_eq!(ef.sparse_index[0].0, b"a");
+        assert_eq!(ef.sparse_index[1].0, b"c");
+        assert_eq!(ef.sparse_index[2].0, b"e");
+
+        // Each offset should decode to the correct entry when used as a starting position
+        for (sparse_key, offset) in &ef.sparse_index {
+            let slice = &ef.data[*offset as usize..];
+            let decoded = Encoder::decode_all(slice).unwrap();
+            assert_eq!(
+                &decoded[0].key, sparse_key,
+                "sparse index offset {} should point to entry with key {:?}",
+                offset,
+                String::from_utf8_lossy(sparse_key)
+            );
+        }
+    }
+
+    #[test]
+    fn test_sparse_index_first_offset_is_zero() {
+        let entries = vec![
+            WalEntry::set(1, b"x".to_vec(), b"y".to_vec()),
+        ];
+        let ef = LSMTree::encode_for_flush(&entries);
+        assert_eq!(ef.sparse_index.len(), 1);
+        assert_eq!(ef.sparse_index[0].1, 0, "first sparse index offset must be 0");
+    }
+
+    #[test]
+    fn test_sparse_index_offsets_with_variable_size_entries() {
+        // Use entries with very different sizes to catch cumulative vs incremental bugs
+        let entries = vec![
+            WalEntry::set(1, b"k".to_vec(), b"v".to_vec()),             // small
+            WalEntry::set(2, b"k2".to_vec(), b"value2".to_vec()),       // medium
+            WalEntry::set(3, b"key3".to_vec(), b"a]long_value_here".to_vec()), // large
+            WalEntry::set(4, b"k4".to_vec(), b"v4".to_vec()),           // small again
+        ];
+
+        let ef = LSMTree::encode_for_flush(&entries);
+
+        // With SPARSE_INDEX_INTERVAL=2, indexed at positions 0 and 2
+        assert_eq!(ef.sparse_index.len(), 2);
+
+        // Verify offset[0] points to entries[0]
+        let decoded_from_0 = Encoder::decode_all(&ef.data[ef.sparse_index[0].1 as usize..]).unwrap();
+        assert_eq!(decoded_from_0[0].key, b"k");
+
+        // Verify offset[1] points to entries[2], not somewhere wrong
+        let decoded_from_1 = Encoder::decode_all(&ef.data[ef.sparse_index[1].1 as usize..]).unwrap();
+        assert_eq!(decoded_from_1[0].key, b"key3");
+    }
 }
