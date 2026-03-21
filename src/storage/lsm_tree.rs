@@ -6,7 +6,7 @@ use crate::storage::memtable::{BTreeMapMemTable, MemTable, MemTableEntry};
 use crate::storage::sstable::{SSTableStorageManager, SSTablesStorage};
 use crate::storage::wal::{Wal, WalStorage};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::sync::oneshot::error::TryRecvError;
 
 const FLUSH_THRESHOLD_BYTES: usize = 500; // 1 MB
@@ -24,7 +24,7 @@ pub(super) struct EncodedFlush {
 pub struct LSMTree {
     memtable: Box<dyn MemTable + Sync + Send>,
     wal: Box<dyn WalStorage + Sync + Send>,
-    sstable_manager: Arc<Mutex<SSTableStorageManager>>,
+    sstable_manager: Arc<RwLock<SSTableStorageManager>>,
 
     flushing_memtable: Option<Box<dyn MemTable + Sync + Send>>,
     flushing_wal: Option<Box<dyn WalStorage + Sync + Send>>,
@@ -38,7 +38,7 @@ impl LSMTree {
         LSMTree {
             memtable: Box::new(BTreeMapMemTable::new()),
             wal,
-            sstable_manager: Arc::new(Mutex::new(SSTableStorageManager::new(fs).await)),
+            sstable_manager: Arc::new(RwLock::new(SSTableStorageManager::new(fs).await)),
 
             flushing_memtable: None,
             flushing_wal: None,
@@ -51,7 +51,7 @@ impl LSMTree {
         LSMTree {
             memtable: Box::new(BTreeMapMemTable::new()),
             wal,
-            sstable_manager: Arc::new(Mutex::new(SSTableStorageManager::new(fs).await)),
+            sstable_manager: Arc::new(RwLock::new(SSTableStorageManager::new(fs).await)),
 
             flushing_memtable: None,
             flushing_wal: None,
@@ -117,7 +117,7 @@ impl LSMTree {
     ) {
         let sstable_manager = self.sstable_manager.clone();
         tokio::spawn(async move {
-            let mut sstable_manager = sstable_manager.lock().await;
+            let mut sstable_manager = sstable_manager.write().await;
             if let Err(e) = sstable_manager
                 .flush(&encoded_data, &sparse_index, min_key, max_key)
                 .await
@@ -203,7 +203,7 @@ impl StorageEngine for LSMTree {
                 "Key: {} not found in memtable or flushing memtable, checking SSTables",
                 String::from_utf8_lossy(key)
             );
-            let sstable_manager = self.sstable_manager.lock().await;
+            let sstable_manager = self.sstable_manager.read().await;
             let result = match sstable_manager.read(key).await {
                 Ok(Some(value)) => return GetResult::Value(value),
                 Ok(None) => GetResult::NotFound,
