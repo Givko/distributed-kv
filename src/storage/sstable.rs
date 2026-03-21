@@ -164,13 +164,16 @@ impl SSTablesStorage for SSTableStorageManager {
             };
 
             eprintln!(
-                "Using sparse index for SSTable file: {}, sparse index size: {}",
+                "Using sparse index for SSTable file: {}, sparse index size: {} with values: {:?}",
                 metadata.file_path,
-                sparse_index.len()
+                sparse_index.len(),
+                sparse_index
+                    .iter()
+                    .map(|(k, v)| (String::from_utf8_lossy(k), v))
+                    .collect::<Vec<_>>()
             );
             let mut left = 0;
             let mut right = sparse_index.len() as i32 - 1;
-
             while left <= right {
                 let mid = (left + right) / 2;
                 let cur_entry = &sparse_index[mid as usize];
@@ -203,20 +206,17 @@ impl SSTablesStorage for SSTableStorageManager {
                 }
             };
 
-            //let bytes = match file
-            //    .seek(tokio::io::SeekFrom::Start(starting_offset - 1))
-            //    .await
-            //{
-            //    Ok(b) => b,
-            //    Err(e) => {
-            //        eprintln!("Failed to seek in SSTable file: {}", e);
-            //        return Err(e);
-            //    }
-            //};
-            //eprintln!(
-            //    "Seeked to offset {} in SSTable file: {}, bytes seeked: {}",
-            //    starting_offset, metadata.file_path, bytes
-            //);
+            let bytes = match file.seek(tokio::io::SeekFrom::Start(starting_offset)).await {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("Failed to seek in SSTable file: {}", e);
+                    return Err(e);
+                }
+            };
+            eprintln!(
+                "Seeked to offset {} in SSTable file: {}, bytes seeked: {}",
+                starting_offset, metadata.file_path, bytes
+            );
 
             let mut buf = Vec::new();
             let read_bytes = match file.read_to_end(&mut buf).await {
