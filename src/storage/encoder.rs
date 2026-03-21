@@ -306,4 +306,63 @@ mod tests {
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0], entry);
     }
+
+    #[test]
+    fn test_encode_into_returns_bytes_written_not_buffer_len() {
+        let entry = Entry::set(1, b"key".to_vec(), b"val".to_vec());
+        let mut buf = Vec::new();
+
+        let written1 = Encoder::encode_into(&entry, &mut buf);
+        assert_eq!(written1, buf.len(), "first call should match buffer length");
+
+        let len_before = buf.len();
+        let written2 = Encoder::encode_into(&entry, &mut buf);
+        let actual_bytes_added = buf.len() - len_before;
+        assert_eq!(
+            written2, actual_bytes_added,
+            "second call should return only the bytes it wrote, not the total buffer length"
+        );
+    }
+
+    #[test]
+    fn test_encode_into_returns_same_as_encode_len() {
+        let entries = vec![
+            Entry::set(1, b"a".to_vec(), b"x".to_vec()),
+            Entry::set(2, b"longer_key".to_vec(), b"longer_value".to_vec()),
+            Entry::delete(3, b"del".to_vec()),
+        ];
+        for entry in &entries {
+            let standalone = Encoder::encode(entry);
+            let mut buf = Vec::new();
+            let written = Encoder::encode_into(entry, &mut buf);
+            assert_eq!(written, standalone.len());
+        }
+    }
+
+    #[test]
+    fn test_encode_into_accumulated_offsets_are_correct() {
+        let entries = vec![
+            Entry::set(1, b"a".to_vec(), b"x".to_vec()),
+            Entry::set(2, b"bb".to_vec(), b"yy".to_vec()),
+            Entry::set(3, b"ccc".to_vec(), b"zzz".to_vec()),
+        ];
+        let mut buf = Vec::new();
+        let mut offset: u64 = 0;
+        let mut recorded_offsets = Vec::new();
+
+        for entry in &entries {
+            recorded_offsets.push(offset);
+            let written = Encoder::encode_into(entry, &mut buf);
+            offset += written as u64;
+        }
+
+        // Each recorded offset should be the start of that entry in the buffer.
+        // Verify by decoding from each offset.
+        for (i, &entry_offset) in recorded_offsets.iter().enumerate() {
+            let slice = &buf[entry_offset as usize..];
+            let decoded = Encoder::decode_all(slice).unwrap();
+            // The first decoded entry from this offset should match entries[i]
+            assert_eq!(decoded[0], entries[i], "entry at offset {} should be entries[{}]", entry_offset, i);
+        }
+    }
 }
