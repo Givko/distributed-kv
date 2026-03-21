@@ -23,7 +23,7 @@ This is purely a learning project. The goal is to understand distributed systems
 | InstallSnapshot RPC | Planned |
 | LSM MemTable + WAL | ✅ Complete |
 | SSTable flush | ✅ Complete |
-| SSTable read path | 🔄 In Progress |
+| SSTable read path | ✅ Complete |
 | Bloom filters | Planned |
 | Size-tiered compaction | Planned |
 | Raft ↔ LSM integration | ✅ Complete |
@@ -31,7 +31,7 @@ This is purely a learning project. The goal is to understand distributed systems
 
 ## Architecture
 
-Current state machine: `BTreeMap`-backed LSM tree with a Write-Ahead Log and SSTable flush. Planned: SSTable read path integration, bloom filters, and size-tiered compaction.
+Current state machine: `BTreeMap`-backed LSM tree with a Write-Ahead Log, SSTable flush, and multi-level read path (MemTable → SSTables). Planned: bloom filters and size-tiered compaction.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -75,17 +75,20 @@ The cluster runs a 3-node Raft protocol for strong consistency. Every write is r
 
 **Client interaction** — writes (`SET`) go through Raft consensus: the leader replicates the command, waits for majority acknowledgment, commits, applies, then responds. The leader tracks pending client reply channels keyed by log index. Non-leader nodes reject writes. Reads (`GET`) are served by any node directly from the local state machine; followers may return stale data (see Known Limitations).
 
-### LSM Storage Engine *(in progress)*
+### LSM Storage Engine
 
 Replaces the in-memory `HashMap` state machine with a durable, crash-safe storage engine.
 
-- **MemTable** — in-memory sorted map (`BTreeMap<Vec<u8>, Vec<u8>>`) for fast writes
-- **Write-Ahead Log** — binary-encoded append-only file, fsync'd on every write for durability before acknowledgment
-- **SSTable flush** — when MemTable exceeds size threshold, flush sorted entries to immutable SSTable file with a sparse index. Single fsync at end of flush; old WAL deleted only after SSTable fsync succeeds
-- **Multi-level read path** — check MemTable first, then SSTables newest-to-oldest. First result wins. Tombstones short-circuit the search
-- **Bloom filters** — per-SSTable probabilistic filter loaded into memory, eliminates unnecessary disk reads for missing keys
-- **Size-tiered compaction** — merge N similarly-sized SSTables into one, resolving duplicates and expired tombstones. Old SSTables deleted only after merged output is renamed into place (atomic on Linux)
-- **Binary format** — length-prefixed records with big-endian u32 sizes: `[op_type: 1B][key_len: 4B][key][value_len: 4B][value]`. Same encoding for WAL entries and SSTable records
+- **MemTable** — in-memory sorted map (`BTreeMap<Vec<u8>, MemTableEntry>`) for fast writes, with size tracking to trigger flushes
+- **Write-Ahead Log** — binary-encoded append-only file, fsync'd on every write for durability before acknowledgment. Supports rotation for flush and recovery of partial flushes
+- **SSTable flush** — when MemTable exceeds size threshold, a background task flushes sorted entries to an immutable SSTable file with a sparse index. Single fsync at end of flush; old WAL deleted only after SSTable fsync succeeds. Retried indefinitely on failure (idempotent via truncate-on-write)
+- **SSTable read path** — binary search on the sparse index to find the starting offset, then sequential scan from that point. SSTables are checked newest-to-oldest; first match wins. Min/max key ranges per SSTable skip files that can't contain the target key
+- **Multi-level read path** — check MemTable first, then flushing MemTable (if flush in progress), then SSTables newest-to-oldest. Tombstones short-circuit the search
+- **Crash recovery** — on startup, replay the current WAL into a fresh MemTable. If a stale flush WAL exists (`wal.log.tmp`), its entries are recovered and the flush is retried, ensuring no data loss even on mid-flush crashes
+- **File I/O abstraction** — `FileSystem` and `FileHandle` traits decouple storage code from the OS, enabling in-memory fakes for deterministic unit testing
+- **Binary format** — length-prefixed records: `[total_len: 4B][index: 8B][op: 1B][key_len: 4B][key][value_len: 4B][value]`. Same encoding for WAL entries and SSTable records
+- **Bloom filters** *(planned)* — per-SSTable probabilistic filter to eliminate unnecessary disk reads for missing keys. Currently using min/max key ranges instead
+- **Size-tiered compaction** *(planned)* — merge N similarly-sized SSTables into one, resolving duplicates and expired tombstones
 
 ### RESP Wire Protocol *(planned)*
 
@@ -147,8 +150,9 @@ src/
 │   ├── encoder.rs            # Binary codec: encode/decode WAL records
 │   ├── wal.rs                # WalStorage trait + file-backed Wal implementation
 │   ├── memtable.rs           # MemTable trait + BTreeMap implementation
-│   ├── sstable.rs            # SSTable writer, sparse index, metadata manager
-│   └── lsm_tree.rs           # LSMTree: MemTable + WAL + flush; StorageEngine impl
+│   ├── fs.rs                 # FileSystem + FileHandle traits (DI for testability)
+│   ├── sstable.rs            # SSTable read/write, sparse index, metadata manager
+│   └── lsm_tree.rs           # LSMTree: MemTable + WAL + flush + recovery; StorageEngine impl
 └── raft/
     ├── mod.rs                # Module declarations + generated proto inclusion
     ├── raft_types.rs         # Message types, log entries, RPC data structures
@@ -215,7 +219,9 @@ Verify the service and method names match your `.proto` package/service definiti
 cargo test
 ```
 
-The test suite uses mock persisters (TestPersister, LoadedStatePersister, RecordingPersister, FailingLoadPersister) to isolate Raft logic from disk I/O.
+The Raft tests use mock persisters (TestPersister, LoadedStatePersister, RecordingPersister, FailingLoadPersister) to isolate consensus logic from disk I/O. The storage tests use an in-memory `FileSystem` fake to test SSTable and WAL behaviour without touching the filesystem.
+
+### Raft consensus
 
 **Leader election:** granting votes to up-to-date candidates, rejecting votes when already voted for a different candidate, rejecting candidates with stale terms, rejecting candidates with shorter or older logs, stepping down on higher terms, majority vote counting, and idempotent voting for the same candidate.
 
@@ -228,6 +234,16 @@ The test suite uses mock persisters (TestPersister, LoadedStatePersister, Record
 **Snapshot boundary:** accepting AppendEntries when prev_log_index matches snapshot_last_index/term, rejecting when snapshot term doesn't match.
 
 **Safety invariants:** same-term heartbeats don't reset voted_for (preventing double-voting within a term).
+
+### Storage engine
+
+**Encoder:** encode/decode round-trips for set and delete operations, corruption detection on truncated or malformed records, multi-entry encoding with correct offset accumulation.
+
+**MemTable:** byte-accurate size tracking across insertions, overwrites, and deletes; lexicographic key ordering; tombstone handling.
+
+**LSM tree:** get/set/delete through the full write path, WAL persistence and recovery (including recovery after set+delete sequences and recovery followed by new writes), flush simulation with sparse index offset correctness, and Raft index tracking across operations.
+
+**SSTable:** read path with sparse index binary search, range filtering (skip SSTables where key is out of min/max bounds), newer-SSTable-wins ordering, fallback to older SSTables, keys between sparse index entries found via linear scan. Flush path: file creation with incrementing IDs, data round-trips through encoder, sparse index deserialization, min/max key metadata, size tracking, and metadata persistence and recovery across manager instances.
 
 ## Built With
 
