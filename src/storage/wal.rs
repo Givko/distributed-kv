@@ -1,32 +1,34 @@
 use std::io;
-use std::path::PathBuf;
-use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use std::sync::Arc;
+
+use crate::storage::fs::{FileHandle, FileSystem};
 
 #[async_trait::async_trait]
 pub trait WalStorage: Send + Sync {
     async fn append(&mut self, data: &[u8]) -> io::Result<()>;
     async fn read_all(&mut self) -> io::Result<Vec<u8>>;
+    async fn rotate(&mut self, flush_path: &str) -> io::Result<Box<dyn WalStorage + Send + Sync>>;
+    async fn open_read(&self, path: &str) -> io::Result<Box<dyn WalStorage + Send + Sync>>;
+    async fn remove(&self) -> io::Result<()>;
 }
 
 pub struct Wal {
-    file_handle: File,
+    file_handle: Box<dyn FileHandle>,
+    path: String,
+    fs: Arc<dyn FileSystem>,
 }
 
 impl Wal {
-    pub async fn new(path: PathBuf) -> Self {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .read(true)
-            .open(&path)
+    pub(super) async fn new(path: &str, fs: Arc<dyn FileSystem>) -> Self {
+        let file = fs
+            .create_or_append(path)
             .await
             .expect("Failed to open WAL file");
-        Self { file_handle: file }
-    }
-
-    pub(super) fn from_file(file: File) -> Self {
-        Self { file_handle: file }
+        Self {
+            file_handle: file,
+            path: path.to_string(),
+            fs,
+        }
     }
 }
 
@@ -45,5 +47,26 @@ impl WalStorage for Wal {
         self.file_handle.read_to_end(&mut buffer).await?;
         self.file_handle.rewind().await?;
         Ok(buffer)
+    }
+
+    async fn rotate(&mut self, flush_path: &str) -> io::Result<Box<dyn WalStorage + Send + Sync>> {
+        self.fs.rename(&self.path, flush_path).await?;
+        let original_path = self.path.clone();
+        self.path = flush_path.to_string();
+        let new_wal = Wal::new(&original_path, self.fs.clone()).await;
+        Ok(Box::new(new_wal))
+    }
+
+    async fn open_read(&self, path: &str) -> io::Result<Box<dyn WalStorage + Send + Sync>> {
+        let file = self.fs.open_read(path).await?;
+        Ok(Box::new(Wal {
+            file_handle: file,
+            path: path.to_string(),
+            fs: self.fs.clone(),
+        }))
+    }
+
+    async fn remove(&self) -> io::Result<()> {
+        self.fs.remove_file(&self.path).await
     }
 }
