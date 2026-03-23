@@ -1,4 +1,5 @@
 use crate::raft::state_machine::{GetResult, StorageEngine};
+use crate::storage::bloom_filter::{self, BloomFilter, SimpleBloomFilter};
 use crate::storage::encoder::Encoder;
 use crate::storage::entry::Entry;
 use crate::storage::fs::TokioFileSystem;
@@ -19,6 +20,7 @@ pub(super) struct EncodedFlush {
     pub(super) sparse_index: Vec<(Vec<u8>, u64)>,
     pub(super) min_key: Vec<u8>,
     pub(super) max_key: Vec<u8>,
+    pub(super) bloom_filter: SimpleBloomFilter,
 }
 
 pub struct LSMTree {
@@ -62,6 +64,7 @@ impl LSMTree {
     pub(super) fn encode_for_flush(entries: &[Entry]) -> EncodedFlush {
         let mut data = Vec::new();
         let mut sparse_index: Vec<(Vec<u8>, u64)> = Vec::new();
+        let mut bloom_filter = SimpleBloomFilter::new(10000);
         let min_key = entries.first().map(|e| e.key.clone()).unwrap_or_default();
         let max_key = entries.last().map(|e| e.key.clone()).unwrap_or_default();
         let mut offset: u64 = 0;
@@ -70,6 +73,7 @@ impl LSMTree {
                 sparse_index.push((entry.key.clone(), offset));
             }
 
+            bloom_filter.insert(&entry.key);
             let bytes_written = Encoder::encode_into(entry, &mut data);
             offset += bytes_written as u64;
         }
@@ -79,6 +83,7 @@ impl LSMTree {
             sparse_index,
             min_key,
             max_key,
+            bloom_filter,
         }
     }
 
@@ -95,8 +100,7 @@ impl LSMTree {
         let ef = Self::encode_for_flush(&old_entries);
         let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
         self.flush_finished = Some(rcv);
-        self.spawn_flush_task(snd, ef.data, ef.sparse_index, ef.min_key, ef.max_key)
-            .await;
+        self.spawn_flush_task(snd, ef).await;
 
         Ok(())
     }
@@ -104,16 +108,19 @@ impl LSMTree {
     async fn spawn_flush_task(
         &mut self,
         notification_channel: tokio::sync::oneshot::Sender<bool>,
-        encoded_data: Vec<u8>,
-        sparse_index: Vec<(Vec<u8>, u64)>,
-        min_key: Vec<u8>,
-        max_key: Vec<u8>,
+        ef: EncodedFlush,
     ) {
         let sstable_manager = self.sstable_manager.clone();
         tokio::spawn(async move {
             let mut sstable_manager = sstable_manager.write().await;
             if let Err(e) = sstable_manager
-                .flush(&encoded_data, &sparse_index, min_key, max_key)
+                .flush(
+                    &ef.data,
+                    &ef.sparse_index,
+                    ef.min_key,
+                    ef.max_key,
+                    ef.bloom_filter,
+                )
                 .await
             {
                 eprintln!("Failed to flush memtable to SSTable: {e}");
@@ -300,8 +307,7 @@ impl StorageEngine for LSMTree {
             .to_entries();
         let ef = Self::encode_for_flush(&old_entries);
         let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
-        self.spawn_flush_task(snd, ef.data, ef.sparse_index, ef.min_key, ef.max_key)
-            .await;
+        self.spawn_flush_task(snd, ef).await;
         self.flush_finished = Some(rcv);
         Ok(())
     }
