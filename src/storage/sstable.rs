@@ -5,6 +5,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::storage::bloom_filter::{BloomFilter, SimpleBloomFilter};
 use crate::storage::encoder::Encoder;
 use crate::storage::fs::FileSystem;
 
@@ -16,6 +17,7 @@ pub(super) trait SSTablesStorage {
         sparse_index: &[(Vec<u8>, u64)],
         min_key: Vec<u8>,
         max_key: Vec<u8>,
+        bloom_filter: SimpleBloomFilter,
     ) -> io::Result<()>;
     #[allow(dead_code)]
     async fn read(&self, key: &[u8]) -> io::Result<Option<Vec<u8>>>;
@@ -33,6 +35,7 @@ pub(super) struct SSTableFileMetadata {
 
     // Key, offset pairs for faster lookups
     sparse_index: PathBuf,
+    bloom_filter: SimpleBloomFilter,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -118,6 +121,13 @@ impl SSTablesStorage for SSTableStorageManager {
                     metadata.file_path,
                     String::from_utf8_lossy(&metadata.min_key),
                     String::from_utf8_lossy(&metadata.max_key)
+                );
+                continue;
+            }
+            if !metadata.bloom_filter.contains(key) {
+                eprintln!(
+                    "Skipping SSTable file: {} as bloom filter indicates key is not present",
+                    metadata.file_path
                 );
                 continue;
             }
@@ -239,6 +249,7 @@ impl SSTablesStorage for SSTableStorageManager {
         sparse_index: &[(Vec<u8>, u64)],
         min_key: Vec<u8>,
         max_key: Vec<u8>,
+        bloom_filter: SimpleBloomFilter,
     ) -> io::Result<()> {
         let file_id = self.metadata.cur_max_file_id + 1;
         let path = format!("sstable_{}.dat", file_id);
@@ -251,6 +262,7 @@ impl SSTablesStorage for SSTableStorageManager {
             max_key,
             size_in_bytes: data.len() as u64,
             sparse_index: PathBuf::from(sparse_index_path.clone()),
+            bloom_filter,
         };
 
         // We want truncate so that retries are idempotent
@@ -424,7 +436,13 @@ mod tests {
     async fn flush_entries(manager: &mut SSTableStorageManager, entries: &[Entry]) {
         let ef = LSMTree::encode_for_flush(entries);
         manager
-            .flush(&ef.data, &ef.sparse_index, ef.min_key, ef.max_key)
+            .flush(
+                &ef.data,
+                &ef.sparse_index,
+                ef.min_key,
+                ef.max_key,
+                ef.bloom_filter,
+            )
             .await
             .expect("flush should succeed");
     }
@@ -438,24 +456,38 @@ mod tests {
     #[tokio::test]
     async fn test_read_returns_value_for_existing_key() {
         let (mut manager, _) = make_manager().await;
-        flush_entries(&mut manager, &[
-            Entry::set(1, b"apple".to_vec(), b"red".to_vec()),
-            Entry::set(2, b"banana".to_vec(), b"yellow".to_vec()),
-            Entry::set(3, b"cherry".to_vec(), b"dark_red".to_vec()),
-        ]).await;
+        flush_entries(
+            &mut manager,
+            &[
+                Entry::set(1, b"apple".to_vec(), b"red".to_vec()),
+                Entry::set(2, b"banana".to_vec(), b"yellow".to_vec()),
+                Entry::set(3, b"cherry".to_vec(), b"dark_red".to_vec()),
+            ],
+        )
+        .await;
 
         assert_eq!(manager.read(b"apple").await.unwrap(), Some(b"red".to_vec()));
-        assert_eq!(manager.read(b"banana").await.unwrap(), Some(b"yellow".to_vec()));
-        assert_eq!(manager.read(b"cherry").await.unwrap(), Some(b"dark_red".to_vec()));
+        assert_eq!(
+            manager.read(b"banana").await.unwrap(),
+            Some(b"yellow".to_vec())
+        );
+        assert_eq!(
+            manager.read(b"cherry").await.unwrap(),
+            Some(b"dark_red".to_vec())
+        );
     }
 
     #[tokio::test]
     async fn test_read_returns_none_for_missing_key_in_range() {
         let (mut manager, _) = make_manager().await;
-        flush_entries(&mut manager, &[
-            Entry::set(1, b"apple".to_vec(), b"red".to_vec()),
-            Entry::set(2, b"cherry".to_vec(), b"dark_red".to_vec()),
-        ]).await;
+        flush_entries(
+            &mut manager,
+            &[
+                Entry::set(1, b"apple".to_vec(), b"red".to_vec()),
+                Entry::set(2, b"cherry".to_vec(), b"dark_red".to_vec()),
+            ],
+        )
+        .await;
 
         assert_eq!(manager.read(b"banana").await.unwrap(), None);
     }
@@ -463,10 +495,14 @@ mod tests {
     #[tokio::test]
     async fn test_read_skips_sstable_when_key_out_of_range() {
         let (mut manager, _) = make_manager().await;
-        flush_entries(&mut manager, &[
-            Entry::set(1, b"d".to_vec(), b"v1".to_vec()),
-            Entry::set(2, b"f".to_vec(), b"v2".to_vec()),
-        ]).await;
+        flush_entries(
+            &mut manager,
+            &[
+                Entry::set(1, b"d".to_vec(), b"v1".to_vec()),
+                Entry::set(2, b"f".to_vec(), b"v2".to_vec()),
+            ],
+        )
+        .await;
 
         assert_eq!(manager.read(b"a").await.unwrap(), None);
         assert_eq!(manager.read(b"z").await.unwrap(), None);
@@ -476,13 +512,17 @@ mod tests {
     async fn test_read_newer_sstable_wins() {
         let (mut manager, _) = make_manager().await;
 
-        flush_entries(&mut manager, &[
-            Entry::set(1, b"key".to_vec(), b"old_value".to_vec()),
-        ]).await;
+        flush_entries(
+            &mut manager,
+            &[Entry::set(1, b"key".to_vec(), b"old_value".to_vec())],
+        )
+        .await;
 
-        flush_entries(&mut manager, &[
-            Entry::set(2, b"key".to_vec(), b"new_value".to_vec()),
-        ]).await;
+        flush_entries(
+            &mut manager,
+            &[Entry::set(2, b"key".to_vec(), b"new_value".to_vec())],
+        )
+        .await;
 
         assert_eq!(
             manager.read(b"key").await.unwrap(),
@@ -495,11 +535,15 @@ mod tests {
         let (mut manager, _) = make_manager().await;
         // sparse_index_interval=2: positions 0, 2 are indexed.
         // "banana" at position 1 must be found by scanning from "apple"'s offset.
-        flush_entries(&mut manager, &[
-            Entry::set(1, b"apple".to_vec(), b"red".to_vec()),
-            Entry::set(2, b"banana".to_vec(), b"yellow".to_vec()),
-            Entry::set(3, b"cherry".to_vec(), b"dark_red".to_vec()),
-        ]).await;
+        flush_entries(
+            &mut manager,
+            &[
+                Entry::set(1, b"apple".to_vec(), b"red".to_vec()),
+                Entry::set(2, b"banana".to_vec(), b"yellow".to_vec()),
+                Entry::set(3, b"cherry".to_vec(), b"dark_red".to_vec()),
+            ],
+        )
+        .await;
 
         assert_eq!(
             manager.read(b"banana").await.unwrap(),
@@ -510,15 +554,19 @@ mod tests {
     #[tokio::test]
     async fn test_read_many_entries_finds_last() {
         let (mut manager, _) = make_manager().await;
-        flush_entries(&mut manager, &[
-            Entry::set(1, b"a".to_vec(), b"v1".to_vec()),
-            Entry::set(2, b"b".to_vec(), b"v2".to_vec()),
-            Entry::set(3, b"c".to_vec(), b"v3".to_vec()),
-            Entry::set(4, b"d".to_vec(), b"v4".to_vec()),
-            Entry::set(5, b"e".to_vec(), b"v5".to_vec()),
-            Entry::set(6, b"f".to_vec(), b"v6".to_vec()),
-            Entry::set(7, b"g".to_vec(), b"v7".to_vec()),
-        ]).await;
+        flush_entries(
+            &mut manager,
+            &[
+                Entry::set(1, b"a".to_vec(), b"v1".to_vec()),
+                Entry::set(2, b"b".to_vec(), b"v2".to_vec()),
+                Entry::set(3, b"c".to_vec(), b"v3".to_vec()),
+                Entry::set(4, b"d".to_vec(), b"v4".to_vec()),
+                Entry::set(5, b"e".to_vec(), b"v5".to_vec()),
+                Entry::set(6, b"f".to_vec(), b"v6".to_vec()),
+                Entry::set(7, b"g".to_vec(), b"v7".to_vec()),
+            ],
+        )
+        .await;
 
         assert_eq!(manager.read(b"g").await.unwrap(), Some(b"v7".to_vec()));
     }
@@ -527,13 +575,17 @@ mod tests {
     async fn test_read_falls_back_to_older_sstable() {
         let (mut manager, _) = make_manager().await;
 
-        flush_entries(&mut manager, &[
-            Entry::set(1, b"aaa".to_vec(), b"v1".to_vec()),
-        ]).await;
+        flush_entries(
+            &mut manager,
+            &[Entry::set(1, b"aaa".to_vec(), b"v1".to_vec())],
+        )
+        .await;
 
-        flush_entries(&mut manager, &[
-            Entry::set(2, b"zzz".to_vec(), b"v2".to_vec()),
-        ]).await;
+        flush_entries(
+            &mut manager,
+            &[Entry::set(2, b"zzz".to_vec(), b"v2".to_vec())],
+        )
+        .await;
 
         assert_eq!(manager.read(b"aaa").await.unwrap(), Some(b"v1".to_vec()));
         assert_eq!(manager.read(b"zzz").await.unwrap(), Some(b"v2".to_vec()));
@@ -542,9 +594,11 @@ mod tests {
     #[tokio::test]
     async fn test_read_single_entry_sstable() {
         let (mut manager, _) = make_manager().await;
-        flush_entries(&mut manager, &[
-            Entry::set(1, b"only".to_vec(), b"one".to_vec()),
-        ]).await;
+        flush_entries(
+            &mut manager,
+            &[Entry::set(1, b"only".to_vec(), b"one".to_vec())],
+        )
+        .await;
 
         assert_eq!(manager.read(b"only").await.unwrap(), Some(b"one".to_vec()));
         assert_eq!(manager.read(b"other").await.unwrap(), None);
@@ -553,10 +607,14 @@ mod tests {
     #[tokio::test]
     async fn test_flush_creates_sstable_and_index_files() {
         let (mut manager, fs) = make_manager().await;
-        flush_entries(&mut manager, &[
-            Entry::set(1, b"a".to_vec(), b"v1".to_vec()),
-            Entry::set(2, b"b".to_vec(), b"v2".to_vec()),
-        ]).await;
+        flush_entries(
+            &mut manager,
+            &[
+                Entry::set(1, b"a".to_vec(), b"v1".to_vec()),
+                Entry::set(2, b"b".to_vec(), b"v2".to_vec()),
+            ],
+        )
+        .await;
 
         let storage = fs.storage.lock().unwrap();
         assert!(storage.contains_key("sstable_1.dat"));
@@ -567,12 +625,16 @@ mod tests {
     #[tokio::test]
     async fn test_flush_increments_file_id() {
         let (mut manager, fs) = make_manager().await;
-        flush_entries(&mut manager, &[
-            Entry::set(1, b"a".to_vec(), b"v1".to_vec()),
-        ]).await;
-        flush_entries(&mut manager, &[
-            Entry::set(2, b"b".to_vec(), b"v2".to_vec()),
-        ]).await;
+        flush_entries(
+            &mut manager,
+            &[Entry::set(1, b"a".to_vec(), b"v1".to_vec())],
+        )
+        .await;
+        flush_entries(
+            &mut manager,
+            &[Entry::set(2, b"b".to_vec(), b"v2".to_vec())],
+        )
+        .await;
 
         let storage = fs.storage.lock().unwrap();
         assert!(storage.contains_key("sstable_1.dat"));
@@ -626,12 +688,21 @@ mod tests {
     #[tokio::test]
     async fn test_flush_stores_min_max_keys_in_metadata() {
         let (mut manager, _) = make_manager().await;
-        flush_entries(&mut manager, &[
-            Entry::set(1, b"apple".to_vec(), b"v1".to_vec()),
-            Entry::set(2, b"cherry".to_vec(), b"v2".to_vec()),
-        ]).await;
+        flush_entries(
+            &mut manager,
+            &[
+                Entry::set(1, b"apple".to_vec(), b"v1".to_vec()),
+                Entry::set(2, b"cherry".to_vec(), b"v2".to_vec()),
+            ],
+        )
+        .await;
 
-        let meta = manager.metadata.sstable_file_metadata.values().next().unwrap();
+        let meta = manager
+            .metadata
+            .sstable_file_metadata
+            .values()
+            .next()
+            .unwrap();
         assert_eq!(meta.min_key, b"apple");
         assert_eq!(meta.max_key, b"cherry");
     }
@@ -639,9 +710,11 @@ mod tests {
     #[tokio::test]
     async fn test_flush_metadata_persisted_and_recoverable() {
         let (mut manager, fs) = make_manager().await;
-        flush_entries(&mut manager, &[
-            Entry::set(1, b"key".to_vec(), b"val".to_vec()),
-        ]).await;
+        flush_entries(
+            &mut manager,
+            &[Entry::set(1, b"key".to_vec(), b"val".to_vec())],
+        )
+        .await;
 
         // Create a new manager from the same filesystem — it should recover metadata
         let recovered = SSTableStorageManager::new(fs.clone()).await;
@@ -657,7 +730,105 @@ mod tests {
         let (mut manager, _) = make_manager().await;
         flush_entries(&mut manager, &entries).await;
 
-        let meta = manager.metadata.sstable_file_metadata.values().next().unwrap();
+        let meta = manager
+            .metadata
+            .sstable_file_metadata
+            .values()
+            .next()
+            .unwrap();
         assert_eq!(meta.size_in_bytes, ef.data.len() as u64);
+    }
+
+    // ── bloom filter integration ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_bloom_filter_stored_in_metadata() {
+        let (mut manager, _) = make_manager().await;
+        flush_entries(
+            &mut manager,
+            &[
+                Entry::set(1, b"apple".to_vec(), b"red".to_vec()),
+                Entry::set(2, b"banana".to_vec(), b"yellow".to_vec()),
+            ],
+        )
+        .await;
+
+        let meta = manager
+            .metadata
+            .sstable_file_metadata
+            .values()
+            .next()
+            .unwrap();
+        assert!(meta.bloom_filter.contains(b"apple"));
+        assert!(meta.bloom_filter.contains(b"banana"));
+    }
+
+    #[tokio::test]
+    async fn test_bloom_filter_rejects_missing_key_in_range() {
+        // Key is within min/max range but not in bloom filter — should skip the SSTable
+        let (mut manager, _) = make_manager().await;
+        flush_entries(
+            &mut manager,
+            &[
+                Entry::set(1, b"apple".to_vec(), b"red".to_vec()),
+                Entry::set(2, b"cherry".to_vec(), b"dark_red".to_vec()),
+            ],
+        )
+        .await;
+
+        let meta = manager
+            .metadata
+            .sstable_file_metadata
+            .values()
+            .next()
+            .unwrap();
+        // "banana" is in range [apple, cherry] but was never inserted
+        assert!(!meta.bloom_filter.contains(b"banana"));
+        assert_eq!(manager.read(b"banana").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_bloom_filter_survives_metadata_recovery() {
+        let (mut manager, fs) = make_manager().await;
+        flush_entries(
+            &mut manager,
+            &[Entry::set(1, b"key".to_vec(), b"val".to_vec())],
+        )
+        .await;
+
+        let recovered = SSTableStorageManager::new(fs.clone()).await;
+        let meta = recovered
+            .metadata
+            .sstable_file_metadata
+            .values()
+            .next()
+            .unwrap();
+        assert!(meta.bloom_filter.contains(b"key"));
+        assert!(!meta.bloom_filter.contains(b"missing"));
+    }
+
+    #[tokio::test]
+    async fn test_bloom_filter_per_sstable_is_independent() {
+        let (mut manager, _) = make_manager().await;
+        flush_entries(
+            &mut manager,
+            &[Entry::set(1, b"aaa".to_vec(), b"v1".to_vec())],
+        )
+        .await;
+        flush_entries(
+            &mut manager,
+            &[Entry::set(2, b"zzz".to_vec(), b"v2".to_vec())],
+        )
+        .await;
+
+        let mut metas = manager.metadata.sstable_file_metadata.values();
+        let newer = metas.next().unwrap();
+        let older = metas.next().unwrap();
+
+        // Each bloom filter only knows about its own keys
+        assert!(newer.bloom_filter.contains(b"zzz"));
+        assert!(!newer.bloom_filter.contains(b"aaa"));
+        assert!(older.bloom_filter.contains(b"aaa"));
+        assert!(!older.bloom_filter.contains(b"zzz"));
     }
 }

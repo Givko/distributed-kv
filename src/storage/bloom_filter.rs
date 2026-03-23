@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub(super) trait BloomFilter {
@@ -5,7 +6,8 @@ pub(super) trait BloomFilter {
     fn contains(&self, item: &[u8]) -> bool;
 }
 
-struct SimpleBloomFilter {
+#[derive(Serialize, Deserialize)]
+pub(super) struct SimpleBloomFilter {
     chunks: Vec<u64>,
     num_chunks: u64,
 }
