@@ -186,7 +186,10 @@ mod tests {
             Ok(vec![])
         }
 
-        async fn rotate(&mut self, _flush_path: &str) -> io::Result<Box<dyn WalStorage + Send + Sync>> {
+        async fn rotate(
+            &mut self,
+            _flush_path: &str,
+        ) -> io::Result<Box<dyn WalStorage + Send + Sync>> {
             Ok(Box::new(MockWal))
         }
 
@@ -206,7 +209,7 @@ mod tests {
             RealLSMTree::with_wal(Box::new(MockWal)).await
         }
     }
-
+    //Test pre-commit hook
     #[async_trait::async_trait]
     impl Persister for TestPersister {
         async fn save_state(&self, _state: &PersistentState) -> anyhow::Result<()> {
