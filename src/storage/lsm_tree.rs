@@ -1,5 +1,5 @@
 use crate::raft::state_machine::{GetResult, StorageEngine};
-use crate::storage::bloom_filter::{self, BloomFilter, SimpleBloomFilter};
+use crate::storage::bloom_filter::{BloomFilter, SimpleBloomFilter};
 use crate::storage::encoder::Encoder;
 use crate::storage::entry::Entry;
 use crate::storage::fs::TokioFileSystem;
