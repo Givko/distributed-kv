@@ -20,7 +20,7 @@ The goal is to understand distributed systems and storage engine internals by im
 | LSM MemTable + WAL | ✅ Complete |
 | SSTable flush | ✅ Complete |
 | SSTable read path | ✅ Complete |
-| Bloom filters | Planned |
+| Bloom filters | ✅ Complete |
 | Size-tiered compaction | Planned |
 | Raft ↔ LSM integration | ✅ Complete |
 | RESP wire protocol | Planned |
