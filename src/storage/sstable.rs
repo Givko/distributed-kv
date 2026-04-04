@@ -9,6 +9,7 @@ use crate::storage::bloom_filter::{BloomFilter, SimpleBloomFilter};
 use crate::storage::encoder::Encoder;
 use crate::storage::fs::FileSystem;
 
+const MAX_BUCKET_SIZE: u8 = 5;
 #[async_trait::async_trait]
 pub(super) trait SSTablesStorage {
     async fn flush(
@@ -19,8 +20,9 @@ pub(super) trait SSTablesStorage {
         max_key: Vec<u8>,
         bloom_filter: SimpleBloomFilter,
     ) -> io::Result<()>;
-    #[allow(dead_code)]
+
     async fn read(&self, key: &[u8]) -> io::Result<Option<Vec<u8>>>;
+    async fn compact(&mut self) -> io::Result<()>;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -39,11 +41,23 @@ pub(super) struct SSTableFileMetadata {
 }
 
 #[derive(Serialize, Deserialize)]
+struct SizeBucket {
+    avg_size_in_bytes: u64,
+    file_count: u64,
+
+    //Containing the file_ids of the SSTables in the bucket
+    files: Vec<u64>,
+}
+
+#[derive(Serialize, Deserialize)]
 pub(super) struct Metadata {
     cur_max_file_id: u64,
+    max_bucket_size: u8,
+
     // Using BTreeMap to maintain sorted order of SSTable files based on their file_id
     // This allows for efficient lookups and reading in order from the newest to the oldest SSTable file.
     sstable_file_metadata: BTreeMap<Reverse<u64>, SSTableFileMetadata>,
+    size_buckets: Vec<SizeBucket>,
 }
 
 pub(super) struct SSTableStorageManager {
@@ -61,6 +75,8 @@ impl SSTableStorageManager {
                     Metadata {
                         cur_max_file_id: 0,
                         sstable_file_metadata: BTreeMap::new(),
+                        size_buckets: Vec::new(),
+                        max_bucket_size: MAX_BUCKET_SIZE,
                     }
                 } else {
                     match serde_json::from_slice(&buffer) {
@@ -70,12 +86,16 @@ impl SSTableStorageManager {
                             Metadata {
                                 cur_max_file_id: 0,
                                 sstable_file_metadata: BTreeMap::new(),
+                                size_buckets: Vec::new(),
+                                max_bucket_size: MAX_BUCKET_SIZE,
                             }
                         }
                     }
                 }
             }
             Err(e) => {
+                //Here we might want to abort instead of starting with no data
+                //potentially losing all the data
                 eprintln!(
                     "Metadata file not found, starting with empty metadata. Error: {}",
                     e
@@ -83,9 +103,12 @@ impl SSTableStorageManager {
                 Metadata {
                     cur_max_file_id: 0,
                     sstable_file_metadata: BTreeMap::new(),
+                    size_buckets: Vec::new(),
+                    max_bucket_size: MAX_BUCKET_SIZE,
                 }
             }
         };
+
         Self { metadata, fs }
     }
 
@@ -308,7 +331,33 @@ impl SSTablesStorage for SSTableStorageManager {
         self.metadata
             .sstable_file_metadata
             .insert(Reverse(file_id), sstable_metadata);
+        if let Some(bucket) = self.metadata.size_buckets.iter_mut().find(|b| {
+            let half_avg_size = b.avg_size_in_bytes / 2;
+            let over = b.avg_size_in_bytes + half_avg_size;
+            let under = b.avg_size_in_bytes - half_avg_size;
+
+            let mut fits_in_bucket = false;
+            if (data.len() as u64) >= under && (data.len() as u64) <= over {
+                fits_in_bucket = true;
+            }
+            fits_in_bucket
+        }) {
+            bucket.file_count += 1;
+            bucket.files.push(file_id);
+            let total_size = bucket.avg_size_in_bytes * (bucket.file_count - 1) + data.len() as u64;
+            bucket.avg_size_in_bytes = total_size / bucket.file_count;
+        } else {
+            self.metadata.size_buckets.push(SizeBucket {
+                avg_size_in_bytes: data.len() as u64,
+                file_count: 1,
+                files: vec![file_id],
+            });
+        }
         self.persist_metadata().await?;
+        Ok(())
+    }
+
+    async fn compact(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
