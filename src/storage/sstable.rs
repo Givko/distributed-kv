@@ -139,7 +139,7 @@ impl SSTableStorageManager {
         &mut self,
         sstable_metadata: &SSTableFileMetadata,
     ) -> anyhow::Result<()> {
-        if let Some(bucket) = self.metadata.size_buckets.iter_mut().find(|b| {
+        let bucket = self.metadata.size_buckets.iter_mut().find(|b| {
             let half_avg_size = b.avg_size_in_bytes / 2;
             let avg_plus_half = b.avg_size_in_bytes + half_avg_size;
             let avg_minus_half = b.avg_size_in_bytes - half_avg_size;
@@ -151,19 +151,22 @@ impl SSTableStorageManager {
                 fits_in_bucket = true;
             }
             fits_in_bucket
-        }) {
-            bucket.file_count += 1;
-            bucket.files.push(sstable_metadata.file_id);
-            let total_size =
-                bucket.avg_size_in_bytes * (bucket.file_count - 1) + sstable_metadata.size_in_bytes;
-            bucket.avg_size_in_bytes = total_size / bucket.file_count;
-        } else {
+        });
+        let Some(bucket) = bucket else {
             self.metadata.size_buckets.push(SizeBucket {
                 avg_size_in_bytes: sstable_metadata.size_in_bytes,
                 file_count: 1,
                 files: vec![sstable_metadata.file_id],
             });
-        }
+
+            return Ok(());
+        };
+
+        bucket.file_count += 1;
+        bucket.files.push(sstable_metadata.file_id);
+        let total_size =
+            bucket.avg_size_in_bytes * (bucket.file_count - 1) + sstable_metadata.size_in_bytes;
+        bucket.avg_size_in_bytes = total_size / bucket.file_count;
         Ok(())
     }
 }
@@ -513,7 +516,10 @@ mod tests {
     #[tokio::test]
     async fn test_read_returns_none_when_no_sstables() {
         let (manager, _) = make_manager().await;
-        assert_eq!(manager.read(b"key").await.expect("read should not fail"), None);
+        assert_eq!(
+            manager.read(b"key").await.expect("read should not fail"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -529,7 +535,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(manager.read(b"apple").await.expect("read apple failed"), Some(b"red".to_vec()));
+        assert_eq!(
+            manager.read(b"apple").await.expect("read apple failed"),
+            Some(b"red".to_vec())
+        );
         assert_eq!(
             manager.read(b"banana").await.expect("read banana failed"),
             Some(b"yellow".to_vec())
@@ -552,7 +561,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(manager.read(b"banana").await.expect("read banana failed"), None);
+        assert_eq!(
+            manager.read(b"banana").await.expect("read banana failed"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -631,7 +643,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(manager.read(b"g").await.expect("read 'g' failed"), Some(b"v7".to_vec()));
+        assert_eq!(
+            manager.read(b"g").await.expect("read 'g' failed"),
+            Some(b"v7".to_vec())
+        );
     }
 
     #[tokio::test]
@@ -650,8 +665,14 @@ mod tests {
         )
         .await;
 
-        assert_eq!(manager.read(b"aaa").await.expect("read aaa failed"), Some(b"v1".to_vec()));
-        assert_eq!(manager.read(b"zzz").await.expect("read zzz failed"), Some(b"v2".to_vec()));
+        assert_eq!(
+            manager.read(b"aaa").await.expect("read aaa failed"),
+            Some(b"v1".to_vec())
+        );
+        assert_eq!(
+            manager.read(b"zzz").await.expect("read zzz failed"),
+            Some(b"v2".to_vec())
+        );
     }
 
     #[tokio::test]
@@ -663,8 +684,14 @@ mod tests {
         )
         .await;
 
-        assert_eq!(manager.read(b"only").await.expect("read 'only' failed"), Some(b"one".to_vec()));
-        assert_eq!(manager.read(b"other").await.expect("read 'other' failed"), None);
+        assert_eq!(
+            manager.read(b"only").await.expect("read 'only' failed"),
+            Some(b"one".to_vec())
+        );
+        assert_eq!(
+            manager.read(b"other").await.expect("read 'other' failed"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -725,7 +752,10 @@ mod tests {
 
         let data = {
             let storage = fs.storage.lock().expect("storage mutex poisoned");
-            storage.get("sstable_1.dat").expect("sstable file missing").clone()
+            storage
+                .get("sstable_1.dat")
+                .expect("sstable file missing")
+                .clone()
         };
         let decoded = Encoder::decode_all(&data).expect("decode sstable data failed");
         assert_eq!(decoded.len(), 2);
@@ -735,7 +765,10 @@ mod tests {
         assert_eq!(decoded[1].value, b"val2");
 
         assert_eq!(manager.metadata.size_buckets.len(), 1);
-        assert_eq!(manager.metadata.size_buckets[0].avg_size_in_bytes, data.len() as u64);
+        assert_eq!(
+            manager.metadata.size_buckets[0].avg_size_in_bytes,
+            data.len() as u64
+        );
     }
 
     #[tokio::test]
@@ -750,9 +783,13 @@ mod tests {
 
         let idx_data = {
             let storage = fs.storage.lock().expect("storage mutex poisoned");
-            storage.get("sstable_1.dat.idx").expect("sparse index file missing").clone()
+            storage
+                .get("sstable_1.dat.idx")
+                .expect("sparse index file missing")
+                .clone()
         };
-        let sparse_index: Vec<(Vec<u8>, u64)> = serde_json::from_slice(&idx_data).expect("deserialize sparse index failed");
+        let sparse_index: Vec<(Vec<u8>, u64)> =
+            serde_json::from_slice(&idx_data).expect("deserialize sparse index failed");
         // SPARSE_INDEX_INTERVAL=2: positions 0 and 2 are indexed
         assert_eq!(sparse_index.len(), 2);
         assert_eq!(sparse_index[0].0, b"a");
@@ -801,7 +838,10 @@ mod tests {
         let recovered = SSTableStorageManager::new(fs.clone()).await;
         assert_eq!(recovered.metadata.cur_max_file_id, 1);
         assert_eq!(recovered.metadata.sstable_file_metadata.len(), 1);
-        assert_eq!(recovered.read(b"key").await.expect("recovered read failed"), Some(b"val".to_vec()));
+        assert_eq!(
+            recovered.read(b"key").await.expect("recovered read failed"),
+            Some(b"val".to_vec())
+        );
 
         assert_eq!(recovered.metadata.size_buckets.len(), 1);
         assert_eq!(recovered.metadata.size_buckets[0].file_count, 1);
@@ -824,7 +864,10 @@ mod tests {
         assert_eq!(meta.size_in_bytes, ef.data.len() as u64);
 
         assert_eq!(manager.metadata.size_buckets.len(), 1);
-        assert_eq!(manager.metadata.size_buckets[0].avg_size_in_bytes, ef.data.len() as u64);
+        assert_eq!(
+            manager.metadata.size_buckets[0].avg_size_in_bytes,
+            ef.data.len() as u64
+        );
     }
 
     // ── bloom filter integration ────────────────────────────────────────────
@@ -872,7 +915,10 @@ mod tests {
             .expect("expected at least one sstable metadata");
         // "banana" is in range [apple, cherry] but was never inserted
         assert!(!meta.bloom_filter.contains(b"banana"));
-        assert_eq!(manager.read(b"banana").await.expect("read banana failed"), None);
+        assert_eq!(
+            manager.read(b"banana").await.expect("read banana failed"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -938,7 +984,9 @@ mod tests {
     async fn test_size_bucket_first_sstable_creates_new_bucket() {
         let (mut manager, _) = make_manager().await;
         let meta = dummy_sstable_meta(1, 1000);
-        manager.put_sstable_in_size_bucket(&meta).expect("bucket assignment failed");
+        manager
+            .put_sstable_in_size_bucket(&meta)
+            .expect("bucket assignment failed");
 
         assert_eq!(manager.metadata.size_buckets.len(), 1);
         assert_eq!(manager.metadata.size_buckets[0].avg_size_in_bytes, 1000);
