@@ -683,6 +683,10 @@ mod tests {
         assert!(storage.contains_key("sstable_1.dat"));
         assert!(storage.contains_key("sstable_1.dat.idx"));
         assert!(storage.contains_key("metadata.dat"));
+
+        assert_eq!(manager.metadata.size_buckets.len(), 1);
+        assert_eq!(manager.metadata.size_buckets[0].file_count, 1);
+        assert_eq!(manager.metadata.size_buckets[0].files, vec![1]);
     }
 
     #[tokio::test]
@@ -703,6 +707,11 @@ mod tests {
         assert!(storage.contains_key("sstable_1.dat"));
         assert!(storage.contains_key("sstable_2.dat"));
         assert_eq!(manager.metadata.cur_max_file_id, 2);
+
+        // Both flushes produce similar-sized SSTables, so they share one bucket
+        assert_eq!(manager.metadata.size_buckets.len(), 1);
+        assert_eq!(manager.metadata.size_buckets[0].file_count, 2);
+        assert_eq!(manager.metadata.size_buckets[0].files, vec![1, 2]);
     }
 
     #[tokio::test]
@@ -724,6 +733,9 @@ mod tests {
         assert_eq!(decoded[0].value, b"val1");
         assert_eq!(decoded[1].key, b"key2");
         assert_eq!(decoded[1].value, b"val2");
+
+        assert_eq!(manager.metadata.size_buckets.len(), 1);
+        assert_eq!(manager.metadata.size_buckets[0].avg_size_in_bytes, data.len() as u64);
     }
 
     #[tokio::test]
@@ -746,6 +758,9 @@ mod tests {
         assert_eq!(sparse_index[0].0, b"a");
         assert_eq!(sparse_index[0].1, 0);
         assert_eq!(sparse_index[1].0, b"c");
+
+        assert_eq!(manager.metadata.size_buckets.len(), 1);
+        assert_eq!(manager.metadata.size_buckets[0].files, vec![1]);
     }
 
     #[tokio::test]
@@ -768,6 +783,9 @@ mod tests {
             .expect("expected at least one sstable metadata");
         assert_eq!(meta.min_key, b"apple");
         assert_eq!(meta.max_key, b"cherry");
+
+        assert_eq!(manager.metadata.size_buckets.len(), 1);
+        assert_eq!(manager.metadata.size_buckets[0].file_count, 1);
     }
 
     #[tokio::test]
@@ -784,6 +802,10 @@ mod tests {
         assert_eq!(recovered.metadata.cur_max_file_id, 1);
         assert_eq!(recovered.metadata.sstable_file_metadata.len(), 1);
         assert_eq!(recovered.read(b"key").await.expect("recovered read failed"), Some(b"val".to_vec()));
+
+        assert_eq!(recovered.metadata.size_buckets.len(), 1);
+        assert_eq!(recovered.metadata.size_buckets[0].file_count, 1);
+        assert_eq!(recovered.metadata.size_buckets[0].files, vec![1]);
     }
 
     #[tokio::test]
@@ -800,6 +822,9 @@ mod tests {
             .next()
             .expect("expected at least one sstable metadata");
         assert_eq!(meta.size_in_bytes, ef.data.len() as u64);
+
+        assert_eq!(manager.metadata.size_buckets.len(), 1);
+        assert_eq!(manager.metadata.size_buckets[0].avg_size_in_bytes, ef.data.len() as u64);
     }
 
     // ── bloom filter integration ────────────────────────────────────────────
