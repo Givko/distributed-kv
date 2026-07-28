@@ -39,11 +39,11 @@ pub(super) async fn compact_bucket(
         for entry in decoded {
             match merged.entry(entry.key.clone()) {
                 btree_map::Entry::Vacant(e) => {
-                    e.insert(entry.clone());
+                    e.insert(entry);
                 }
                 btree_map::Entry::Occupied(mut e) => {
                     if entry.index > e.get().index {
-                        e.insert(entry.clone());
+                        e.insert(entry);
                     }
                 }
             }
