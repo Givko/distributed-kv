@@ -1,15 +1,26 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::storage::bloom_filter::{BloomFilter, SimpleBloomFilter};
 use crate::storage::encoder::Encoder;
+use crate::storage::entry::Entry;
 use crate::storage::fs::FileSystem;
 
-const MAX_BUCKET_SIZE: u8 = 5;
+const MAX_BUCKET_SIZE: u64 = 5;
+const SPARSE_INDEX_INTERVAL: usize = 2;
+
+pub(super) struct EncodedFlush {
+    pub(super) data: Vec<u8>,
+    pub(super) sparse_index: Vec<(Vec<u8>, u64)>,
+    pub(super) min_key: Vec<u8>,
+    pub(super) max_key: Vec<u8>,
+    pub(super) bloom_filter: SimpleBloomFilter,
+}
+
 #[async_trait::async_trait]
 pub(super) trait SSTablesStorage {
     async fn flush(
@@ -20,7 +31,7 @@ pub(super) trait SSTablesStorage {
         max_key: Vec<u8>,
         bloom_filter: SimpleBloomFilter,
     ) -> io::Result<()>;
-
+    fn encode_for_flush(entries: &[Entry]) -> EncodedFlush;
     async fn read(&self, key: &[u8]) -> io::Result<Option<Vec<u8>>>;
 
     #[allow(dead_code)]
@@ -54,7 +65,7 @@ struct SizeBucket {
 #[derive(Serialize, Deserialize)]
 pub(super) struct Metadata {
     cur_max_file_id: u64,
-    max_bucket_size: u8,
+    max_bucket_size: u64,
 
     // Using BTreeMap to maintain sorted order of SSTable files based on their file_id
     // This allows for efficient lookups and reading in order from the newest to the oldest SSTable file.
@@ -167,6 +178,51 @@ impl SSTableStorageManager {
         let total_size =
             bucket.avg_size_in_bytes * (bucket.file_count - 1) + sstable_metadata.size_in_bytes;
         bucket.avg_size_in_bytes = total_size / bucket.file_count;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    async fn compact_bucket(&self, bucket: &SizeBucket) -> io::Result<()> {
+        let mut file_handles = vec![];
+        //let max_file_id = bucket
+        //     .files
+        //     .iter()
+        //     .max()
+        //     .expect("bucket should have at least one file");
+        //let new_sstable_name_tmp = format!("sstable_{}.dat.tmp", max_file_id + 1);
+        for file_id in &bucket.files {
+            let metadata = self
+                .metadata
+                .sstable_file_metadata
+                .get(&Reverse(*file_id))
+                .expect("file metadata should exist");
+
+            let file_handle = self.fs.open_read(&metadata.file_path).await?;
+            file_handles.push(file_handle);
+        }
+
+        //Load all sstables in memory in a list of BTreeMaps to be merged
+        let mut merged = BTreeMap::new();
+        for mut file_handle in file_handles {
+            let mut buffer = Vec::new();
+            file_handle.read_to_end(&mut buffer).await?;
+
+            let decoded = Encoder::decode_all(&buffer)?;
+            for entry in decoded {
+                match merged.entry(entry.key.clone()) {
+                    btree_map::Entry::Vacant(e) => {
+                        e.insert(entry.clone());
+                    }
+                    btree_map::Entry::Occupied(mut e) => {
+                        let existing_entry = e.get();
+                        if entry.index > existing_entry.index {
+                            e.insert(entry.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -303,6 +359,31 @@ impl SSTablesStorage for SSTableStorageManager {
         Ok(None)
     }
 
+    fn encode_for_flush(entries: &[Entry]) -> EncodedFlush {
+        let mut data = Vec::new();
+        let mut sparse_index: Vec<(Vec<u8>, u64)> = Vec::new();
+        let mut bloom_filter = SimpleBloomFilter::new(10000);
+        let min_key = entries.first().map(|e| e.key.clone()).unwrap_or_default();
+        let max_key = entries.last().map(|e| e.key.clone()).unwrap_or_default();
+        let mut offset: u64 = 0;
+        for (counter, entry) in entries.iter().enumerate() {
+            if counter % SPARSE_INDEX_INTERVAL == 0 {
+                sparse_index.push((entry.key.clone(), offset));
+            }
+
+            bloom_filter.insert(&entry.key);
+            let bytes_written = Encoder::encode_into(entry, &mut data);
+            offset += bytes_written as u64;
+        }
+
+        EncodedFlush {
+            data,
+            sparse_index,
+            min_key,
+            max_key,
+            bloom_filter,
+        }
+    }
     async fn flush(
         &mut self,
         data: &[u8],
@@ -375,6 +456,15 @@ impl SSTablesStorage for SSTableStorageManager {
     }
 
     async fn compact(&mut self) -> io::Result<()> {
+        let buckets_to_compact = self
+            .metadata
+            .size_buckets
+            .iter()
+            .filter(|bucket| bucket.file_count > self.metadata.max_bucket_size);
+        for bucket in buckets_to_compact {
+            self.compact_bucket(bucket).await?;
+        }
+
         Ok(())
     }
 }
@@ -384,7 +474,6 @@ mod tests {
     use super::*;
     use crate::storage::entry::Entry;
     use crate::storage::fs::{FileHandle, FileSystem};
-    use crate::storage::lsm_tree::LSMTree;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
 
@@ -500,7 +589,7 @@ mod tests {
     }
 
     async fn flush_entries(manager: &mut SSTableStorageManager, entries: &[Entry]) {
-        let ef = LSMTree::encode_for_flush(entries);
+        let ef = SSTableStorageManager::encode_for_flush(entries);
         manager
             .flush(
                 &ef.data,
@@ -851,7 +940,7 @@ mod tests {
     #[tokio::test]
     async fn test_flush_records_size_in_bytes() {
         let entries = [Entry::set(1, b"k".to_vec(), b"v".to_vec())];
-        let ef = LSMTree::encode_for_flush(&entries);
+        let ef = SSTableStorageManager::encode_for_flush(&entries);
         let (mut manager, _) = make_manager().await;
         flush_entries(&mut manager, &entries).await;
 

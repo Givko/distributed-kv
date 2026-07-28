@@ -1,10 +1,9 @@
 use crate::raft::state_machine::{GetResult, StorageEngine};
-use crate::storage::bloom_filter::{BloomFilter, SimpleBloomFilter};
 use crate::storage::encoder::Encoder;
 use crate::storage::entry::Entry;
 use crate::storage::fs::TokioFileSystem;
 use crate::storage::memtable::{BTreeMapMemTable, MemTable, MemTableEntry};
-use crate::storage::sstable::{SSTableStorageManager, SSTablesStorage};
+use crate::storage::sstable::{EncodedFlush, SSTableStorageManager, SSTablesStorage};
 use crate::storage::wal::{Wal, WalStorage};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -13,15 +12,6 @@ use tokio::sync::oneshot::error::TryRecvError;
 const FLUSH_THRESHOLD_BYTES: usize = 500; // 1 MB
 const FLUSH_WAL_PATH: &str = "wal.log.tmp";
 const WALL_FILE_PATH: &str = "wal.log";
-const SPARSE_INDEX_INTERVAL: usize = 2;
-
-pub(super) struct EncodedFlush {
-    pub(super) data: Vec<u8>,
-    pub(super) sparse_index: Vec<(Vec<u8>, u64)>,
-    pub(super) min_key: Vec<u8>,
-    pub(super) max_key: Vec<u8>,
-    pub(super) bloom_filter: SimpleBloomFilter,
-}
 
 pub struct LSMTree {
     memtable: Box<dyn MemTable + Sync + Send>,
@@ -61,32 +51,6 @@ impl LSMTree {
         }
     }
 
-    pub(super) fn encode_for_flush(entries: &[Entry]) -> EncodedFlush {
-        let mut data = Vec::new();
-        let mut sparse_index: Vec<(Vec<u8>, u64)> = Vec::new();
-        let mut bloom_filter = SimpleBloomFilter::new(10000);
-        let min_key = entries.first().map(|e| e.key.clone()).unwrap_or_default();
-        let max_key = entries.last().map(|e| e.key.clone()).unwrap_or_default();
-        let mut offset: u64 = 0;
-        for (counter, entry) in entries.iter().enumerate() {
-            if counter % SPARSE_INDEX_INTERVAL == 0 {
-                sparse_index.push((entry.key.clone(), offset));
-            }
-
-            bloom_filter.insert(&entry.key);
-            let bytes_written = Encoder::encode_into(entry, &mut data);
-            offset += bytes_written as u64;
-        }
-
-        EncodedFlush {
-            data,
-            sparse_index,
-            min_key,
-            max_key,
-            bloom_filter,
-        }
-    }
-
     async fn flush(&mut self) -> anyhow::Result<()> {
         let new_wal = self.wal.rotate(FLUSH_WAL_PATH).await?;
 
@@ -97,7 +61,7 @@ impl LSMTree {
         self.flushing_wal = Some(std::mem::replace(&mut self.wal, new_wal));
 
         let old_entries = self.flushing_memtable.as_ref().unwrap().to_entries();
-        let ef = Self::encode_for_flush(&old_entries);
+        let ef = SSTableStorageManager::encode_for_flush(&old_entries);
         let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
         self.flush_finished = Some(rcv);
         self.spawn_flush_task(snd, ef).await;
@@ -305,7 +269,7 @@ impl StorageEngine for LSMTree {
             .as_ref()
             .expect("Flushing memtable should exist")
             .to_entries();
-        let ef = Self::encode_for_flush(&old_entries);
+        let ef = SSTableStorageManager::encode_for_flush(&old_entries);
         let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
         self.spawn_flush_task(snd, ef).await;
         self.flush_finished = Some(rcv);
@@ -644,7 +608,7 @@ mod tests {
             WalEntry::set(5, b"e".to_vec(), b"val_eeee".to_vec()),
         ];
 
-        let ef = LSMTree::encode_for_flush(&entries);
+        let ef = SSTableStorageManager::encode_for_flush(&entries);
 
         assert_eq!(ef.sparse_index.len(), 3);
         assert_eq!(ef.sparse_index[0].0, b"a");
@@ -667,7 +631,7 @@ mod tests {
     #[test]
     fn test_sparse_index_first_offset_is_zero() {
         let entries = vec![WalEntry::set(1, b"x".to_vec(), b"y".to_vec())];
-        let ef = LSMTree::encode_for_flush(&entries);
+        let ef = SSTableStorageManager::encode_for_flush(&entries);
         assert_eq!(ef.sparse_index.len(), 1);
         assert_eq!(
             ef.sparse_index[0].1, 0,
@@ -684,7 +648,7 @@ mod tests {
             WalEntry::set(4, b"k4".to_vec(), b"v4".to_vec()),
         ];
 
-        let ef = LSMTree::encode_for_flush(&entries);
+        let ef = SSTableStorageManager::encode_for_flush(&entries);
 
         assert_eq!(ef.sparse_index.len(), 2);
 

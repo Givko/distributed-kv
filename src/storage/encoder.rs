@@ -362,7 +362,11 @@ mod tests {
             let slice = &buf[entry_offset as usize..];
             let decoded = Encoder::decode_all(slice).unwrap();
             // The first decoded entry from this offset should match entries[i]
-            assert_eq!(decoded[0], entries[i], "entry at offset {} should be entries[{}]", entry_offset, i);
+            assert_eq!(
+                decoded[0], entries[i],
+                "entry at offset {} should be entries[{}]",
+                entry_offset, i
+            );
         }
     }
 }
