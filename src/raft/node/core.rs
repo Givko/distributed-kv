@@ -318,6 +318,7 @@ mod tests {
     use super::*;
     use crate::raft::raft_types::{AppendEntriesData, RequestVoteData, RequestVoteReplyData};
     use crate::raft::state_persister::PersistentState;
+    use crate::raft::test_support::MockEngine;
     use crate::storage::encoder::Encoder;
     use crate::storage::entry::Entry as WalEntry;
     use crate::storage::lsm_tree::LSMTree as RealLSMTree;
@@ -332,31 +333,6 @@ mod tests {
     struct FailingLoadPersister;
     struct RecordingPersister {
         saved_state: Arc<Mutex<Option<PersistentState>>>,
-    }
-
-    struct MockWal {}
-
-    #[async_trait::async_trait]
-    impl WalStorage for MockWal {
-        async fn append(&mut self, _data: &[u8]) -> io::Result<()> {
-            Ok(())
-        }
-
-        async fn read_all(&mut self) -> io::Result<Vec<u8>> {
-            Ok(vec![])
-        }
-
-        async fn rotate(&mut self, _flush_path: &str) -> io::Result<Box<dyn WalStorage + Send + Sync>> {
-            Ok(Box::new(MockWal {}))
-        }
-
-        async fn open_read(&self, _path: &str) -> io::Result<Box<dyn WalStorage + Send + Sync>> {
-            Err(io::Error::new(io::ErrorKind::NotFound, "not found"))
-        }
-
-        async fn remove(&self) -> io::Result<()> {
-            Ok(())
-        }
     }
 
     /// A mock WAL that returns pre-encoded bytes from `read_all`.
@@ -394,15 +370,6 @@ mod tests {
 
         async fn remove(&self) -> io::Result<()> {
             Ok(())
-        }
-    }
-
-    struct LSMTree;
-
-    impl LSMTree {
-        async fn new() -> RealLSMTree {
-            let wal = Box::new(MockWal {});
-            RealLSMTree::with_wal(wal).await
         }
     }
 
@@ -516,7 +483,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             persister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         assert_eq!(node.current_term, 7);
@@ -540,7 +507,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             FailingLoadPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await;
         assert!(result.is_err());
@@ -796,7 +763,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             persister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.state = State::Leader;
@@ -820,7 +787,7 @@ mod tests {
             network_inbox,
             "self".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 1;
@@ -869,7 +836,7 @@ mod tests {
             network_inbox,
             "self".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 1;
@@ -923,7 +890,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
 
@@ -956,7 +923,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
 
@@ -985,7 +952,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
 
@@ -1010,7 +977,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
 

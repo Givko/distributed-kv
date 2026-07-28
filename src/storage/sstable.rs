@@ -1,11 +1,14 @@
+mod bloom_filter;
+mod compaction;
+
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, btree_map};
+use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::storage::bloom_filter::{BloomFilter, SimpleBloomFilter};
+use self::bloom_filter::{BloomFilter, SimpleBloomFilter};
 use crate::storage::encoder::Encoder;
 use crate::storage::entry::Entry;
 use crate::storage::fs::FileSystem;
@@ -13,25 +16,20 @@ use crate::storage::fs::FileSystem;
 const MAX_BUCKET_SIZE: u64 = 5;
 const SPARSE_INDEX_INTERVAL: usize = 2;
 
-pub(super) struct EncodedFlush {
+pub(super) struct SSTablePayload {
     pub(super) data: Vec<u8>,
     pub(super) sparse_index: Vec<(Vec<u8>, u64)>,
     pub(super) min_key: Vec<u8>,
     pub(super) max_key: Vec<u8>,
-    pub(super) bloom_filter: SimpleBloomFilter,
+    // Private to sstable: bloom filters are an internal detail of the on-disk
+    // format. Callers (e.g. lsm_tree) pass SSTablePayload through opaquely.
+    bloom_filter: SimpleBloomFilter,
 }
 
 #[async_trait::async_trait]
 pub(super) trait SSTablesStorage {
-    async fn flush(
-        &mut self,
-        data: &[u8],
-        sparse_index: &[(Vec<u8>, u64)],
-        min_key: Vec<u8>,
-        max_key: Vec<u8>,
-        bloom_filter: SimpleBloomFilter,
-    ) -> io::Result<()>;
-    fn encode_for_flush(entries: &[Entry]) -> EncodedFlush;
+    async fn flush(&mut self, payload: SSTablePayload) -> io::Result<()>;
+    fn encode_for_flush(entries: &[Entry]) -> SSTablePayload;
     async fn read(&self, key: &[u8]) -> io::Result<Option<Vec<u8>>>;
 
     #[allow(dead_code)]
@@ -43,7 +41,7 @@ pub(super) struct SSTableFileMetadata {
     // non decreasing file ID for each new SSTable file
     // This can be used to determine the order of SSTable files and to manage them effectively.
     file_id: u64,
-    file_path: String,
+    pub(super) file_path: String,
     min_key: Vec<u8>,
     max_key: Vec<u8>,
     size_in_bytes: u64,
@@ -54,12 +52,12 @@ pub(super) struct SSTableFileMetadata {
 }
 
 #[derive(Serialize, Deserialize)]
-struct SizeBucket {
+pub(super) struct SizeBucket {
     avg_size_in_bytes: u64,
     file_count: u64,
 
     //Containing the file_ids of the SSTables in the bucket
-    files: Vec<u64>,
+    pub(super) files: Vec<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -183,47 +181,7 @@ impl SSTableStorageManager {
 
     #[allow(dead_code)]
     async fn compact_bucket(&self, bucket: &SizeBucket) -> io::Result<()> {
-        let mut file_handles = vec![];
-        //let max_file_id = bucket
-        //     .files
-        //     .iter()
-        //     .max()
-        //     .expect("bucket should have at least one file");
-        //let new_sstable_name_tmp = format!("sstable_{}.dat.tmp", max_file_id + 1);
-        for file_id in &bucket.files {
-            let metadata = self
-                .metadata
-                .sstable_file_metadata
-                .get(&Reverse(*file_id))
-                .expect("file metadata should exist");
-
-            let file_handle = self.fs.open_read(&metadata.file_path).await?;
-            file_handles.push(file_handle);
-        }
-
-        //Load all sstables in memory in a list of BTreeMaps to be merged
-        let mut merged = BTreeMap::new();
-        for mut file_handle in file_handles {
-            let mut buffer = Vec::new();
-            file_handle.read_to_end(&mut buffer).await?;
-
-            let decoded = Encoder::decode_all(&buffer)?;
-            for entry in decoded {
-                match merged.entry(entry.key.clone()) {
-                    btree_map::Entry::Vacant(e) => {
-                        e.insert(entry.clone());
-                    }
-                    btree_map::Entry::Occupied(mut e) => {
-                        let existing_entry = e.get();
-                        if entry.index > existing_entry.index {
-                            e.insert(entry.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        compaction::compact_bucket(&self.metadata.sstable_file_metadata, &self.fs, bucket).await
     }
 }
 
@@ -359,7 +317,7 @@ impl SSTablesStorage for SSTableStorageManager {
         Ok(None)
     }
 
-    fn encode_for_flush(entries: &[Entry]) -> EncodedFlush {
+    fn encode_for_flush(entries: &[Entry]) -> SSTablePayload {
         let mut data = Vec::new();
         let mut sparse_index: Vec<(Vec<u8>, u64)> = Vec::new();
         let mut bloom_filter = SimpleBloomFilter::new(10000);
@@ -376,7 +334,7 @@ impl SSTablesStorage for SSTableStorageManager {
             offset += bytes_written as u64;
         }
 
-        EncodedFlush {
+        SSTablePayload {
             data,
             sparse_index,
             min_key,
@@ -384,14 +342,14 @@ impl SSTablesStorage for SSTableStorageManager {
             bloom_filter,
         }
     }
-    async fn flush(
-        &mut self,
-        data: &[u8],
-        sparse_index: &[(Vec<u8>, u64)],
-        min_key: Vec<u8>,
-        max_key: Vec<u8>,
-        bloom_filter: SimpleBloomFilter,
-    ) -> io::Result<()> {
+    async fn flush(&mut self, payload: SSTablePayload) -> io::Result<()> {
+        let SSTablePayload {
+            data,
+            sparse_index,
+            min_key,
+            max_key,
+            bloom_filter,
+        } = payload;
         let file_id = self.metadata.cur_max_file_id + 1;
         let path = format!("sstable_{}.dat", file_id);
         let sparse_index_path = format!("sstable_{}.dat.idx", file_id);
@@ -412,7 +370,7 @@ impl SSTablesStorage for SSTableStorageManager {
             .create_or_truncate(&path)
             .await
             .expect("Failed to open SSTable file");
-        if let Err(e) = file.write_all(data).await {
+        if let Err(e) = file.write_all(&data).await {
             eprintln!("Failed to write to SSTable file: {}", e);
             return Err(e);
         }
@@ -589,17 +547,8 @@ mod tests {
     }
 
     async fn flush_entries(manager: &mut SSTableStorageManager, entries: &[Entry]) {
-        let ef = SSTableStorageManager::encode_for_flush(entries);
-        manager
-            .flush(
-                &ef.data,
-                &ef.sparse_index,
-                ef.min_key,
-                ef.max_key,
-                ef.bloom_filter,
-            )
-            .await
-            .expect("flush should succeed");
+        let payload = SSTableStorageManager::encode_for_flush(entries);
+        manager.flush(payload).await.expect("flush should succeed");
     }
 
     #[tokio::test]
@@ -940,7 +889,7 @@ mod tests {
     #[tokio::test]
     async fn test_flush_records_size_in_bytes() {
         let entries = [Entry::set(1, b"k".to_vec(), b"v".to_vec())];
-        let ef = SSTableStorageManager::encode_for_flush(&entries);
+        let payload = SSTableStorageManager::encode_for_flush(&entries);
         let (mut manager, _) = make_manager().await;
         flush_entries(&mut manager, &entries).await;
 
@@ -950,12 +899,12 @@ mod tests {
             .values()
             .next()
             .expect("expected at least one sstable metadata");
-        assert_eq!(meta.size_in_bytes, ef.data.len() as u64);
+        assert_eq!(meta.size_in_bytes, payload.data.len() as u64);
 
         assert_eq!(manager.metadata.size_buckets.len(), 1);
         assert_eq!(
             manager.metadata.size_buckets[0].avg_size_in_bytes,
-            ef.data.len() as u64
+            payload.data.len() as u64
         );
     }
 

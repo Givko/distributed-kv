@@ -3,7 +3,7 @@ use crate::storage::encoder::Encoder;
 use crate::storage::entry::Entry;
 use crate::storage::fs::TokioFileSystem;
 use crate::storage::memtable::{BTreeMapMemTable, MemTable, MemTableEntry};
-use crate::storage::sstable::{EncodedFlush, SSTableStorageManager, SSTablesStorage};
+use crate::storage::sstable::{SSTablePayload, SSTableStorageManager, SSTablesStorage};
 use crate::storage::wal::{Wal, WalStorage};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -61,10 +61,10 @@ impl LSMTree {
         self.flushing_wal = Some(std::mem::replace(&mut self.wal, new_wal));
 
         let old_entries = self.flushing_memtable.as_ref().unwrap().to_entries();
-        let ef = SSTableStorageManager::encode_for_flush(&old_entries);
+        let payload = SSTableStorageManager::encode_for_flush(&old_entries);
         let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
         self.flush_finished = Some(rcv);
-        self.spawn_flush_task(snd, ef).await;
+        self.spawn_flush_task(snd, payload).await;
 
         Ok(())
     }
@@ -72,21 +72,12 @@ impl LSMTree {
     async fn spawn_flush_task(
         &mut self,
         notification_channel: tokio::sync::oneshot::Sender<bool>,
-        ef: EncodedFlush,
+        payload: SSTablePayload,
     ) {
         let sstable_manager = self.sstable_manager.clone();
         tokio::spawn(async move {
             let mut sstable_manager = sstable_manager.write().await;
-            if let Err(e) = sstable_manager
-                .flush(
-                    &ef.data,
-                    &ef.sparse_index,
-                    ef.min_key,
-                    ef.max_key,
-                    ef.bloom_filter,
-                )
-                .await
-            {
+            if let Err(e) = sstable_manager.flush(payload).await {
                 eprintln!("Failed to flush memtable to SSTable: {e}");
                 notification_channel
                     .send(false)
@@ -269,9 +260,9 @@ impl StorageEngine for LSMTree {
             .as_ref()
             .expect("Flushing memtable should exist")
             .to_entries();
-        let ef = SSTableStorageManager::encode_for_flush(&old_entries);
+        let payload = SSTableStorageManager::encode_for_flush(&old_entries);
         let (snd, rcv) = tokio::sync::oneshot::channel::<bool>();
-        self.spawn_flush_task(snd, ef).await;
+        self.spawn_flush_task(snd, payload).await;
         self.flush_finished = Some(rcv);
         Ok(())
     }
@@ -608,15 +599,15 @@ mod tests {
             WalEntry::set(5, b"e".to_vec(), b"val_eeee".to_vec()),
         ];
 
-        let ef = SSTableStorageManager::encode_for_flush(&entries);
+        let payload = SSTableStorageManager::encode_for_flush(&entries);
 
-        assert_eq!(ef.sparse_index.len(), 3);
-        assert_eq!(ef.sparse_index[0].0, b"a");
-        assert_eq!(ef.sparse_index[1].0, b"c");
-        assert_eq!(ef.sparse_index[2].0, b"e");
+        assert_eq!(payload.sparse_index.len(), 3);
+        assert_eq!(payload.sparse_index[0].0, b"a");
+        assert_eq!(payload.sparse_index[1].0, b"c");
+        assert_eq!(payload.sparse_index[2].0, b"e");
 
-        for (sparse_key, offset) in &ef.sparse_index {
-            let slice = &ef.data[*offset as usize..];
+        for (sparse_key, offset) in &payload.sparse_index {
+            let slice = &payload.data[*offset as usize..];
             let decoded = Encoder::decode_all(slice).unwrap();
             assert_eq!(
                 &decoded[0].key,
@@ -631,10 +622,10 @@ mod tests {
     #[test]
     fn test_sparse_index_first_offset_is_zero() {
         let entries = vec![WalEntry::set(1, b"x".to_vec(), b"y".to_vec())];
-        let ef = SSTableStorageManager::encode_for_flush(&entries);
-        assert_eq!(ef.sparse_index.len(), 1);
+        let payload = SSTableStorageManager::encode_for_flush(&entries);
+        assert_eq!(payload.sparse_index.len(), 1);
         assert_eq!(
-            ef.sparse_index[0].1, 0,
+            payload.sparse_index[0].1, 0,
             "first sparse index offset must be 0"
         );
     }
@@ -648,16 +639,16 @@ mod tests {
             WalEntry::set(4, b"k4".to_vec(), b"v4".to_vec()),
         ];
 
-        let ef = SSTableStorageManager::encode_for_flush(&entries);
+        let payload = SSTableStorageManager::encode_for_flush(&entries);
 
-        assert_eq!(ef.sparse_index.len(), 2);
+        assert_eq!(payload.sparse_index.len(), 2);
 
         let decoded_from_0 =
-            Encoder::decode_all(&ef.data[ef.sparse_index[0].1 as usize..]).unwrap();
+            Encoder::decode_all(&payload.data[payload.sparse_index[0].1 as usize..]).unwrap();
         assert_eq!(decoded_from_0[0].key, b"k");
 
         let decoded_from_1 =
-            Encoder::decode_all(&ef.data[ef.sparse_index[1].1 as usize..]).unwrap();
+            Encoder::decode_all(&payload.data[payload.sparse_index[1].1 as usize..]).unwrap();
         assert_eq!(decoded_from_1[0].key, b"key3");
     }
 }

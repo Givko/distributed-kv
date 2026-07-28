@@ -184,44 +184,9 @@ mod tests {
     use super::*;
     use crate::raft::raft_types::{AppendEntriesData, AppendEntriesReplyData};
     use crate::raft::state_persister::PersistentState;
-    use crate::storage::lsm_tree::LSMTree as RealLSMTree;
-    use crate::storage::wal::WalStorage;
-    use std::io;
+    use crate::raft::test_support::MockEngine;
 
     struct TestPersister;
-
-    struct MockWal;
-
-    #[async_trait::async_trait]
-    impl WalStorage for MockWal {
-        async fn append(&mut self, _data: &[u8]) -> io::Result<()> {
-            Ok(())
-        }
-
-        async fn read_all(&mut self) -> io::Result<Vec<u8>> {
-            Ok(vec![])
-        }
-
-        async fn rotate(&mut self, _flush_path: &str) -> io::Result<Box<dyn WalStorage + Send + Sync>> {
-            Ok(Box::new(MockWal))
-        }
-
-        async fn open_read(&self, _path: &str) -> io::Result<Box<dyn WalStorage + Send + Sync>> {
-            Err(io::Error::new(io::ErrorKind::NotFound, "not found"))
-        }
-
-        async fn remove(&self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct LSMTree;
-
-    impl LSMTree {
-        async fn new() -> RealLSMTree {
-            RealLSMTree::with_wal(Box::new(MockWal)).await
-        }
-    }
 
     #[async_trait::async_trait]
     impl Persister for TestPersister {
@@ -252,7 +217,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 4;
@@ -287,7 +252,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 4;
@@ -320,7 +285,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 1;
@@ -349,7 +314,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 1;
@@ -378,7 +343,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 2;
@@ -407,7 +372,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 2;
@@ -436,7 +401,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 2;
@@ -469,7 +434,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 2;
@@ -507,7 +472,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 2;
@@ -550,7 +515,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 2;
@@ -587,7 +552,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 2;
@@ -625,7 +590,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 2;
@@ -667,7 +632,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 1;
@@ -692,7 +657,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 2;
@@ -720,7 +685,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 2;
@@ -761,7 +726,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 2;
@@ -802,7 +767,7 @@ mod tests {
             network_inbox,
             "node1".to_string(),
             TestPersister,
-            LSMTree::new().await,
+            MockEngine::default(),
         )
         .await?;
         node.current_term = 2;

@@ -8,3 +8,6 @@ pub mod state_machine;
 pub mod proto {
     tonic::include_proto!("proto");
 }
+
+#[cfg(test)]
+pub(in crate::raft) mod test_support;
