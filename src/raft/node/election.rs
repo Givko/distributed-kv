@@ -44,9 +44,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     ) -> anyhow::Result<RequestVoteReplyData> {
         if self.current_term < vote_request.term {
             eprintln!("Stepping down as follower due to higher term in vote request");
-            self.current_term = vote_request.term;
-            self.voted_for.take();
-            self.state = State::Follower;
+            self.step_down(vote_request.term);
             self.persist_state().await?;
         }
 
@@ -86,10 +84,8 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         vote_reply: RequestVoteReplyData,
     ) -> anyhow::Result<()> {
         if vote_reply.term > self.current_term {
-            self.current_term = vote_reply.term;
-            self.state = State::Follower;
-            self.voted_for = None;
             eprintln!("Stepping down to follower due to higher term in vote reply");
+            self.step_down(vote_reply.term);
             self.persist_state().await?;
             return Ok(());
         }
@@ -122,13 +118,314 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             self.current_term
         );
 
-        let next_index = self.last_log_index() + 1;
-        for peer in &self.peers {
-            self.next_index.insert(peer.clone(), next_index);
-            self.match_index.insert(peer.clone(), 0);
-        }
+        self.become_leader();
+        Ok(())
+    }
+}
 
-        self.state = State::Leader;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raft::node::test_helpers::{LSMTree, TestPersister};
+    use crate::raft::raft_types::LogEntry;
+
+    // ============================================================
+    // Election: RequestVote handling and vote-reply / leadership
+    //           transitions
+    // ============================================================
+
+    #[tokio::test]
+    async fn test_handle_vote_request() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        let reply = node
+            .handle_vote_request(RequestVoteData {
+                term: 1,
+                last_log_index: 0,
+                last_log_term: 0,
+                candidate: "node1".to_string(),
+            })
+            .await?;
+        assert!(reply.vote);
+        assert_eq!(node.current_term, 1);
+        assert_eq!(node.state, State::Follower);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_vote_request_already_voted() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.voted_for = Some("node2".to_string());
+        let reply = node
+            .handle_vote_request(RequestVoteData {
+                term: 0,
+                last_log_index: 0,
+                last_log_term: 0,
+                candidate: "node3".to_string(),
+            })
+            .await?;
+        assert!(!reply.vote);
+        assert_eq!(node.current_term, 0);
+        assert_eq!(node.state, State::Follower);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_vote_request_log_term_not_up_to_date() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        let reply = node
+            .handle_vote_request(RequestVoteData {
+                term: 2,
+                last_log_index: 0,
+                last_log_term: 0,
+                candidate: "node1".to_string(),
+            })
+            .await?;
+        assert!(!reply.vote);
+        assert_eq!(node.current_term, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_vote_request_log_index_up_to_date() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        let reply = node
+            .handle_vote_request(RequestVoteData {
+                term: 2,
+                last_log_index: 2,
+                last_log_term: 1,
+                candidate: "node1".to_string(),
+            })
+            .await?;
+        assert!(reply.vote);
+        assert_eq!(node.current_term, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_vote_request_voted_for_same_candidate() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.voted_for = Some("node2".to_string());
+        let reply = node
+            .handle_vote_request(RequestVoteData {
+                term: 1,
+                last_log_index: 0,
+                last_log_term: 0,
+                candidate: "node2".to_string(),
+            })
+            .await?;
+        assert!(reply.vote);
+        assert_eq!(node.current_term, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_vote_request_higher_log_index_not_up_to_date() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd2".to_string(),
+        });
+        let reply = node
+            .handle_vote_request(RequestVoteData {
+                term: 2,
+                last_log_index: 1,
+                last_log_term: 1,
+                candidate: "node1".to_string(),
+            })
+            .await?;
+        assert!(!reply.vote);
+        assert_eq!(node.current_term, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_vote_request_log_term_mismatch() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        let reply = node
+            .handle_vote_request(RequestVoteData {
+                term: 2,
+                last_log_index: 1,
+                last_log_term: 0,
+                candidate: "node1".to_string(),
+            })
+            .await?;
+        assert!(!reply.vote);
+        assert_eq!(node.current_term, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_vote_request_stale_term() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 2;
+        let reply = node
+            .handle_vote_request(RequestVoteData {
+                term: 1,
+                last_log_index: 0,
+                last_log_term: 0,
+                candidate: "node1".to_string(),
+            })
+            .await?;
+        assert!(!reply.vote);
+        assert_eq!(node.current_term, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_vote_request_candidate_has_higher_term() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd1".to_string(),
+        });
+        node.entries.push(LogEntry {
+            term: 1,
+            command: "cmd2".to_string(),
+        });
+        let reply = node
+            .handle_vote_request(RequestVoteData {
+                term: 3,
+                last_log_index: 1,
+                last_log_term: 2,
+                candidate: "node1".to_string(),
+            })
+            .await?;
+        assert!(reply.vote);
+        assert_eq!(node.current_term, 3);
+        assert_eq!(node.state, State::Follower);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_vote_reply_become_leader() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec!["node1".to_string(), "node2".to_string()],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 1;
+        node.state = State::Candidate { votes: 1 };
+        node.handle_request_vote_reply(RequestVoteReplyData {
+            term: 1,
+            vote: true,
+        })
+        .await?;
+        assert_eq!(node.state, State::Leader);
+        assert_eq!(node.current_term, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_vote_request_reply_no_majority() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let mut node = Node::new(
+            vec!["node1".to_string(), "node2".to_string()],
+            network_inbox,
+            "node1".to_string(),
+            TestPersister,
+            LSMTree::new(),
+        )
+        .await?;
+        node.current_term = 1;
+        node.state = State::Candidate { votes: 1 };
+        node.handle_request_vote_reply(RequestVoteReplyData {
+            term: 1,
+            vote: false,
+        })
+        .await?;
+        assert_eq!(node.state, State::Candidate { votes: 1 });
         Ok(())
     }
 }
