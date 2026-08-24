@@ -36,9 +36,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                 && self.get_log_term(append_request.prev_log_index)
                     != append_request.prev_log_term)
         {
-            eprintln!("current_term {}", self.current_term);
-            eprintln!("prev_log_index {}", append_request.prev_log_index);
-            eprintln!("prev_log_term {}", append_request.prev_log_term);
             self.state = if self.current_term < append_request.term {
                 State::Follower
             } else {
@@ -62,7 +59,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         }
 
         if self.state != State::Follower {
-            eprintln!("Received append entries, stepping down to follower");
             self.leader = append_request.leader_id.clone();
             self.state = State::Follower;
         }
@@ -78,10 +74,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         }
 
         let entries_count = append_request.entries.len();
-        if entries_count > 0 {
-            eprintln!("committing new entries {}", entries_count);
-        }
-
         for entry in append_request.entries {
             self.entries.push(entry);
         }
@@ -140,10 +132,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         }
 
         if self.current_term < append_entries_reply_data.term {
-            eprint!(
-                "Stepping down to follower due to new leader with higher term {}",
-                append_entries_reply_data.term
-            );
             self.step_down(append_entries_reply_data.term);
             self.persist_state().await?;
             return Ok(());
@@ -154,10 +142,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             .get(&append_entries_reply_data.peer)
             .expect("no peer found in state");
 
-        eprintln!(
-            "next_index {} for peer {}",
-            next_index, append_entries_reply_data.peer
-        );
         if next_index > 1 {
             next_index -= 1;
         }
@@ -177,11 +161,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             })
             .collect();
 
-        eprintln!(
-            "setting new next_index {} for {}",
-            next_index,
-            append_entries_reply_data.peer.clone()
-        );
         self.next_index
             .insert(append_entries_reply_data.peer.clone(), next_index);
 

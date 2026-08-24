@@ -6,15 +6,9 @@ use crate::raft::state_machine::StorageEngine;
 
 impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     pub(super) async fn start_election(&mut self) -> anyhow::Result<()> {
-        eprintln!("Election timeout, starting election");
         self.current_term += 1;
         self.state = State::Candidate { votes: 1 }; // vote for self
         self.voted_for = Some(self.id.clone());
-        eprintln!(
-            "Current node state: {:?}, term: {}",
-            self.state, self.current_term
-        );
-
         let peers = &self.peers;
         let last_log_index = self.last_log_index();
         let last_log_term = self
@@ -24,7 +18,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
 
         self.persist_state().await?;
         for peer in peers {
-            eprintln!("Sending requestVote to {}", peer);
             let out_msg = OutMsg::RequestVote {
                 term: self.current_term,
                 peer: peer.clone(),
@@ -43,7 +36,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         vote_request: RequestVoteData,
     ) -> anyhow::Result<RequestVoteReplyData> {
         if self.current_term < vote_request.term {
-            eprintln!("Stepping down as follower due to higher term in vote request");
             self.step_down(vote_request.term);
             self.persist_state().await?;
         }
@@ -84,7 +76,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         vote_reply: RequestVoteReplyData,
     ) -> anyhow::Result<()> {
         if vote_reply.term > self.current_term {
-            eprintln!("Stepping down to follower due to higher term in vote reply");
             self.step_down(vote_reply.term);
             self.persist_state().await?;
             return Ok(());
@@ -92,14 +83,12 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
 
         // Ignore stale votes from old terms
         if vote_reply.term != self.current_term {
-            eprintln!("Ignoring stale vote from term {}", vote_reply.term);
             return Ok(());
         }
 
         let mut votes = match self.state {
             State::Candidate { votes } => votes,
             _ => {
-                eprintln!("Received vote reply while not a candidate, ignoring");
                 return Ok(());
             }
         };
@@ -107,16 +96,9 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         votes += if vote_reply.vote { 1 } else { 0 };
         self.state = State::Candidate { votes };
 
-        eprintln!("Total votes received: {}", votes);
         if !self.is_majority(votes) {
-            eprintln!("Did not receive majority votes, remaining candidate");
             return Ok(());
         }
-
-        eprintln!(
-            "Received majority votes, becoming leader with term {}",
-            self.current_term
-        );
 
         self.become_leader();
         Ok(())
