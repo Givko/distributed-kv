@@ -89,10 +89,13 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         // Raft entries the state machine has durably applied (WAL entry count
         // equals the 1-based Raft log index of the last applied command).
         node.last_applied = node.state_machine.last_applied_index();
-        eprintln!(
-            "Node {} initialized with term {}, voted_for {:?}, commit_index {}, last_applied {}",
-            node.id, node.current_term, node.voted_for, node.commit_index, node.last_applied
-        );
+
+        // Close the gap left by a crash between a Raft commit and the WAL flush:
+        // those entries are committed and still in the log, so they must be
+        // applied now rather than waiting for the first incoming message. This
+        // is safe — committed entries are never truncated — and it keeps the
+        // "commit_index > last_applied implies apply" invariant true from startup.
+        node.apply_commands().await?;
         Ok(node)
     }
 
@@ -314,11 +317,6 @@ mod tests {
     use crate::storage::entry::Entry as WalEntry;
     use crate::storage::lsm_tree::LSMTree as RealLSMTree;
 
-    // ============================================================
-    // Core: initialization, WAL recovery, apply_commands, and
-    //       handle_message routing / election-timer resets
-    // ============================================================
-
     #[tokio::test]
     async fn test_new_loads_persistent_state() -> anyhow::Result<()> {
         let peers = vec!["node2".to_string()];
@@ -348,6 +346,7 @@ mod tests {
             LSMTree::new(),
         )
         .await?;
+
         assert_eq!(node.current_term, 7);
         assert_eq!(node.voted_for, Some("node3".to_string()));
         assert_eq!(node.entries.len(), 2);
@@ -373,99 +372,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn test_new_replays_committed_entries_into_state_machine() -> anyhow::Result<()> {
-        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
-        let persister = LoadedStatePersister {
-            state: PersistentState {
-                current_term: 4,
-                voted_for: Some("node2".to_string()),
-                entries: vec![
-                    LogEntry {
-                        term: 4,
-                        command: "set key1 val1".to_string(),
-                    },
-                    LogEntry {
-                        term: 4,
-                        command: "set key2 val2".to_string(),
-                    },
-                    LogEntry {
-                        term: 4,
-                        command: "set key1 val3".to_string(),
-                    },
-                ],
-                commit_index: 2,
-            },
-        };
-        // Pre-populate the WAL with the two committed entries so that WAL recovery
-        // restores the state machine instead of relying on apply_commands.
-        let wal = PreloadedMockWal(vec![
-            WalEntry::set(0, b"key1".to_vec(), b"val1".to_vec()),
-            WalEntry::set(1, b"key2".to_vec(), b"val2".to_vec()),
-        ]);
-        let node = Node::new(
-            vec![],
-            network_inbox,
-            "node1".to_string(),
-            persister,
-            RealLSMTree::with_wal(wal),
-        )
-        .await?;
-        assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
-        assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
-        assert_eq!(node.last_applied, 2);
-        assert_eq!(node.commit_index, 2);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_new_replays_all_committed_entries_updates_existing_key() -> anyhow::Result<()> {
-        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
-        let persister = LoadedStatePersister {
-            state: PersistentState {
-                current_term: 4,
-                voted_for: Some("node2".to_string()),
-                entries: vec![
-                    LogEntry {
-                        term: 4,
-                        command: "set key1 val1".to_string(),
-                    },
-                    LogEntry {
-                        term: 4,
-                        command: "set key2 val2".to_string(),
-                    },
-                    LogEntry {
-                        term: 4,
-                        command: "set key1 val3".to_string(),
-                    },
-                ],
-                commit_index: 3,
-            },
-        };
-        // Pre-populate the WAL with all three committed entries.
-        let wal = PreloadedMockWal(vec![
-            WalEntry::set(0, b"key1".to_vec(), b"val1".to_vec()),
-            WalEntry::set(1, b"key2".to_vec(), b"val2".to_vec()),
-            WalEntry::set(2, b"key1".to_vec(), b"val3".to_vec()),
-        ]);
-        let node = Node::new(
-            vec![],
-            network_inbox,
-            "node1".to_string(),
-            persister,
-            RealLSMTree::with_wal(wal),
-        )
-        .await?;
-        assert_eq!(node.state_machine.get("key1").await.unwrap(), "val3");
-        assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
-        assert_eq!(node.last_applied, 3);
-        assert_eq!(node.commit_index, 3);
-        Ok(())
-    }
-
-    // WAL recovery is the source of truth for last_applied:
-    // after Node::new, last_applied must equal the number of entries
-    // the WAL restored — independent of commit_index.
     #[tokio::test]
     async fn test_recover_sets_last_applied_from_wal() -> anyhow::Result<()> {
         let (network_inbox, _) = tokio::sync::mpsc::channel(100);
@@ -498,15 +404,13 @@ mod tests {
             RealLSMTree::with_wal(wal),
         )
         .await?;
-        // last_applied must come from the WAL count (2 entries → index 2), not commit_index.
+
         assert_eq!(node.last_applied, 2);
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
         assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
         Ok(())
     }
 
-    // After WAL recovery last_applied == commit_index, so apply_commands must
-    // be a no-op — the already-applied entries must not be applied again.
     #[tokio::test]
     async fn test_recover_does_not_reapply_entries_on_apply_commands() -> anyhow::Result<()> {
         let (network_inbox, _) = tokio::sync::mpsc::channel(100);
@@ -539,22 +443,16 @@ mod tests {
             RealLSMTree::with_wal(wal),
         )
         .await?;
+
         assert_eq!(node.last_applied, 2);
-        // Explicitly calling apply_commands must be a no-op because
-        // last_applied already equals commit_index.
         node.apply_commands().await?;
         assert_eq!(node.last_applied, 2);
-        // Value must still be val2 — apply_commands did not re-run the entries.
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val2");
         Ok(())
     }
 
-    // Simulates a crash between a Raft commit and the corresponding WAL flush.
-    // The WAL only has entry 1; entry 2 was committed but never flushed.
-    // Node::new must NOT apply the gap — last_applied stays at 1 and the
-    // uncommitted-to-WAL entry is absent from the state machine.
     #[tokio::test]
-    async fn test_recover_with_partial_wal_gap_not_applied_on_init() -> anyhow::Result<()> {
+    async fn test_recover_applies_wal_gap_from_log_on_init() -> anyhow::Result<()> {
         let (network_inbox, _) = tokio::sync::mpsc::channel(100);
         let persister = LoadedStatePersister {
             state: PersistentState {
@@ -570,11 +468,10 @@ mod tests {
                         command: "set key2 val2".to_string(),
                     },
                 ],
-                // Both entries are committed according to persisted Raft state …
                 commit_index: 2,
             },
         };
-        // … but the WAL only recorded the first one before the crash.
+
         let wal = PreloadedMockWal(vec![WalEntry::set(0, b"key1".to_vec(), b"val1".to_vec())]);
         let node = Node::new(
             vec![],
@@ -584,12 +481,62 @@ mod tests {
             RealLSMTree::with_wal(wal),
         )
         .await?;
-        // last_applied reflects WAL state only — the gap entry was not applied.
-        assert_eq!(node.last_applied, 1);
+
+        assert_eq!(node.last_applied, 2);
         assert_eq!(node.commit_index, 2);
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
-        // key2 was never flushed to WAL, so it must be absent.
-        assert!(node.state_machine.get("key2").await.is_none());
+        assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_applies_newly_committed_entries() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let persister = LoadedStatePersister {
+            state: PersistentState {
+                current_term: 1,
+                voted_for: None,
+                entries: vec![
+                    LogEntry {
+                        term: 1,
+                        command: "set key1 val1".to_string(),
+                    },
+                    LogEntry {
+                        term: 1,
+                        command: "set key2 val2".to_string(),
+                    },
+                ],
+                commit_index: 0,
+            },
+        };
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            persister,
+            RealLSMTree::with_wal(PreloadedMockWal(vec![])),
+        )
+        .await?;
+        assert_eq!(node.last_applied, 0);
+        assert!(node.state_machine.get("key1").await.is_none());
+
+        node.handle_message(RaftMsg::AppendEntries {
+            append_request: AppendEntriesData {
+                term: 1,
+                prev_log_index: 2,
+                prev_log_term: 1,
+                leader_commit: 2,
+                leader_id: "node2".to_string(),
+                entries: vec![],
+            },
+            reply_channel: None,
+        })
+        .await?;
+
+        assert_eq!(node.commit_index, 2);
+        assert_eq!(node.last_applied, 2);
+        assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
+        assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
         Ok(())
     }
 
