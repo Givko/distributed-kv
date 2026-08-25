@@ -1,8 +1,8 @@
 use super::{Node, State};
 use crate::raft::network_types::OutMsg;
 use crate::raft::raft_types::{AppendEntriesData, AppendEntriesReplyData, LogEntry};
-use crate::raft::state_persister::Persister;
 use crate::raft::state_machine::StorageEngine;
+use crate::raft::state_persister::Persister;
 
 impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     pub(super) async fn send_heartbeat(&self) -> anyhow::Result<()> {
@@ -33,15 +33,12 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         if self.current_term > append_request.term
             || self.last_log_index() < append_request.prev_log_index
             || (append_request.prev_log_index != 0
-                && self.get_log_term(append_request.prev_log_index)
-                    != append_request.prev_log_term)
+                && self.get_log_term(append_request.prev_log_index) != append_request.prev_log_term)
         {
-            self.state = if self.current_term < append_request.term {
-                State::Follower
-            } else {
-                self.state
-            };
-            self.current_term = std::cmp::max(self.current_term, append_request.term);
+            if self.current_term < append_request.term {
+                self.state = State::Follower;
+                self.current_term = append_request.term;
+            }
 
             self.persist_state().await?;
             return Ok(AppendEntriesReplyData {
@@ -52,7 +49,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             });
         }
 
-        // Reset voted_for on receiving heartbeat from a higher term
         if self.current_term < append_request.term {
             self.current_term = append_request.term;
             self.voted_for = None;
@@ -63,13 +59,11 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             self.state = State::Follower;
         }
 
-        // Remove conflicting entries
         if append_request.prev_log_index != 0
             && self.last_log_index() > append_request.prev_log_index
             && append_request.prev_log_index >= self.snapshot_last_index
         {
-            let truncate_to =
-                (append_request.prev_log_index - self.snapshot_last_index) as usize;
+            let truncate_to = (append_request.prev_log_index - self.snapshot_last_index) as usize;
             self.entries.truncate(truncate_to);
         }
 
@@ -78,10 +72,8 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             self.entries.push(entry);
         }
 
-        // Update commit index
         if append_request.leader_commit > self.commit_index {
-            self.commit_index =
-                std::cmp::min(self.last_log_index(), append_request.leader_commit);
+            self.commit_index = std::cmp::min(self.last_log_index(), append_request.leader_commit);
         }
 
         self.persist_state().await?;
@@ -120,8 +112,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                 }
 
                 if self.is_majority(count)
-                    && self.get_log_entry(log_index).map_or(0, |e| e.term)
-                        == self.current_term
+                    && self.get_log_entry(log_index).map_or(0, |e| e.term) == self.current_term
                 {
                     self.commit_index = log_index;
                 }

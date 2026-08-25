@@ -145,17 +145,12 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         Ok(())
     }
 
-    /// Step down to follower for a newer term: adopt the term, clear any vote
-    /// cast in the old term, and drop to the follower role. This only mutates
-    /// in-memory state — callers are responsible for persisting afterwards.
     pub(super) fn step_down(&mut self, new_term: u64) {
         self.current_term = new_term;
         self.voted_for = None;
         self.state = State::Follower;
     }
 
-    /// Transition to leader after winning an election: initialize the per-peer
-    /// replication indices and assume the leader role.
     pub(super) fn become_leader(&mut self) {
         let next_index = self.last_log_index() + 1;
         for peer in &self.peers {

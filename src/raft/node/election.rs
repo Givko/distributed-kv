@@ -1,8 +1,8 @@
 use super::{Node, State};
 use crate::raft::network_types::OutMsg;
 use crate::raft::raft_types::{RequestVoteData, RequestVoteReplyData};
-use crate::raft::state_persister::Persister;
 use crate::raft::state_machine::StorageEngine;
+use crate::raft::state_persister::Persister;
 
 impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     pub(super) async fn start_election(&mut self) -> anyhow::Result<()> {
@@ -79,10 +79,8 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             self.step_down(vote_reply.term);
             self.persist_state().await?;
             return Ok(());
-        }
-
-        // Ignore stale votes from old terms
-        if vote_reply.term != self.current_term {
+        } else if vote_reply.term < self.current_term {
+            // Ignore stale replies
             return Ok(());
         }
 
@@ -110,11 +108,6 @@ mod tests {
     use super::*;
     use crate::raft::node::test_helpers::{LSMTree, TestPersister};
     use crate::raft::raft_types::LogEntry;
-
-    // ============================================================
-    // Election: RequestVote handling and vote-reply / leadership
-    //           transitions
-    // ============================================================
 
     #[tokio::test]
     async fn test_handle_vote_request() -> anyhow::Result<()> {
