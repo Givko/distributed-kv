@@ -1,7 +1,7 @@
 use super::Node;
 use crate::raft::raft_types::LogEntry;
-use crate::raft::state_persister::Persister;
 use crate::raft::state_machine::StorageEngine;
+use crate::raft::state_persister::Persister;
 
 impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     pub(super) fn last_log_index(&self) -> u64 {

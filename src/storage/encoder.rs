@@ -67,28 +67,47 @@ impl Encoder {
     }
 
     pub fn encode(entry: &Entry) -> Vec<u8> {
-        let mut body = Vec::new();
-        let key_len = entry.key.len() as u32;
-        let value_len = entry.value.len() as u32;
-
-        body.extend_from_slice(&entry.index.to_be_bytes());
-        body.push(entry.op);
-        body.extend_from_slice(&key_len.to_be_bytes());
-        body.extend_from_slice(&entry.key);
-        body.extend_from_slice(&value_len.to_be_bytes());
-        body.extend_from_slice(&entry.value);
-
-        let mut encoded = Vec::with_capacity(4 + body.len());
-        let len = body.len() as u32;
-        encoded.extend_from_slice(&len.to_be_bytes());
-        encoded.extend_from_slice(&body);
+        let mut encoded =
+            Vec::with_capacity(4 + 8 + 1 + 4 + entry.key.len() + 4 + entry.value.len());
+        Self::encode_into(entry, &mut encoded);
         encoded
     }
+
+    // Returns the number of bytes written
+    pub(super) fn encode_into(entry: &Entry, bytes: &mut Vec<u8>) -> usize {
+        let key_len = entry.key.len() as u32;
+        let value_len = entry.value.len() as u32;
+        let index = entry.index.to_be_bytes();
+        let op = &entry.op;
+        let key_len_bytes = key_len.to_be_bytes();
+        let key = &entry.key;
+        let value_len_bytes = value_len.to_be_bytes();
+        let value = &entry.value;
+        let len: u32 = 8 + 1 + 4 + key_len + 4 + value_len;
+
+        bytes.extend_from_slice(&len.to_be_bytes());
+        bytes.extend_from_slice(&index);
+        bytes.push(*op);
+        bytes.extend_from_slice(&key_len_bytes);
+        bytes.extend_from_slice(key);
+        bytes.extend_from_slice(&value_len_bytes);
+        bytes.extend_from_slice(value);
+
+        4 + len as usize
+    }
+
     pub fn decode_all(data: &[u8]) -> io::Result<Vec<Entry>> {
         let mut entries = Vec::new();
         let mut cursor = 0;
-        while cursor + 4 <= data.len() {
+        while cursor < data.len() {
             // Read the record length prefix
+            if cursor + 4 > data.len() {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Corrupted WAL entry: missing length prefix",
+                ));
+            }
+
             let len = u32::from_be_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
             cursor += 4;
             if cursor + len > data.len() {
@@ -286,5 +305,68 @@ mod tests {
         let decoded = Encoder::decode_all(&bytes).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0], entry);
+    }
+
+    #[test]
+    fn test_encode_into_returns_bytes_written_not_buffer_len() {
+        let entry = Entry::set(1, b"key".to_vec(), b"val".to_vec());
+        let mut buf = Vec::new();
+
+        let written1 = Encoder::encode_into(&entry, &mut buf);
+        assert_eq!(written1, buf.len(), "first call should match buffer length");
+
+        let len_before = buf.len();
+        let written2 = Encoder::encode_into(&entry, &mut buf);
+        let actual_bytes_added = buf.len() - len_before;
+        assert_eq!(
+            written2, actual_bytes_added,
+            "second call should return only the bytes it wrote, not the total buffer length"
+        );
+    }
+
+    #[test]
+    fn test_encode_into_returns_same_as_encode_len() {
+        let entries = vec![
+            Entry::set(1, b"a".to_vec(), b"x".to_vec()),
+            Entry::set(2, b"longer_key".to_vec(), b"longer_value".to_vec()),
+            Entry::delete(3, b"del".to_vec()),
+        ];
+        for entry in &entries {
+            let standalone = Encoder::encode(entry);
+            let mut buf = Vec::new();
+            let written = Encoder::encode_into(entry, &mut buf);
+            assert_eq!(written, standalone.len());
+        }
+    }
+
+    #[test]
+    fn test_encode_into_accumulated_offsets_are_correct() {
+        let entries = vec![
+            Entry::set(1, b"a".to_vec(), b"x".to_vec()),
+            Entry::set(2, b"bb".to_vec(), b"yy".to_vec()),
+            Entry::set(3, b"ccc".to_vec(), b"zzz".to_vec()),
+        ];
+        let mut buf = Vec::new();
+        let mut offset: u64 = 0;
+        let mut recorded_offsets = Vec::new();
+
+        for entry in &entries {
+            recorded_offsets.push(offset);
+            let written = Encoder::encode_into(entry, &mut buf);
+            offset += written as u64;
+        }
+
+        // Each recorded offset should be the start of that entry in the buffer.
+        // Verify by decoding from each offset.
+        for (i, &entry_offset) in recorded_offsets.iter().enumerate() {
+            let slice = &buf[entry_offset as usize..];
+            let decoded = Encoder::decode_all(slice).unwrap();
+            // The first decoded entry from this offset should match entries[i]
+            assert_eq!(
+                decoded[0], entries[i],
+                "entry at offset {} should be entries[{}]",
+                entry_offset, i
+            );
+        }
     }
 }
