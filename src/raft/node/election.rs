@@ -6,24 +6,25 @@ use crate::raft::state_persister::Persister;
 
 impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     pub(super) async fn start_election(&mut self) -> anyhow::Result<()> {
-        self.current_term += 1;
-        self.state = State::Candidate { votes: 1 }; // vote for self
-        self.voted_for = Some(self.id.clone());
-        let peers = &self.peers;
+        self.node_state.current_term += 1;
+        self.node_state.state = State::Candidate { votes: 1 }; // vote for self
+        self.node_state.voted_for = Some(self.node_state.id.clone());
+        let peers = &self.node_state.peers;
         let last_log_index = self.last_log_index();
         let last_log_term = self
+            .node_state
             .entries
             .last()
-            .map_or(self.snapshot_last_term, |e| e.term);
+            .map_or(self.node_state.snapshot_last_term, |e| e.term);
 
         self.persist_state().await?;
         for peer in peers {
             let out_msg = OutMsg::RequestVote {
-                term: self.current_term,
+                term: self.node_state.current_term,
                 peer: peer.clone(),
                 last_log_index,
                 last_log_term,
-                candidate: self.id.clone(),
+                candidate: self.node_state.id.clone(),
             };
             self.network_inbox.send(out_msg).await?;
         }
@@ -35,38 +36,39 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         &mut self,
         vote_request: RequestVoteData,
     ) -> anyhow::Result<RequestVoteReplyData> {
-        if self.current_term < vote_request.term {
+        if self.node_state.current_term < vote_request.term {
             self.step_down(vote_request.term);
             self.persist_state().await?;
         }
 
-        let voted_for_candidate = match &self.voted_for {
+        let voted_for_candidate = match &self.node_state.voted_for {
             Some(candidate) => candidate == &vote_request.candidate,
             None => false,
         };
         let last_log_term = self
+            .node_state
             .entries
             .last()
-            .map_or(self.snapshot_last_term, |e| e.term);
+            .map_or(self.node_state.snapshot_last_term, |e| e.term);
 
-        if (self.voted_for.is_some() && !voted_for_candidate)
-            || self.current_term > vote_request.term
+        if (self.node_state.voted_for.is_some() && !voted_for_candidate)
+            || self.node_state.current_term > vote_request.term
             || (last_log_term == vote_request.last_log_term
                 && self.last_log_index() > vote_request.last_log_index)
             || last_log_term > vote_request.last_log_term
         {
             return Ok(RequestVoteReplyData {
-                term: self.current_term,
+                term: self.node_state.current_term,
                 vote: false,
             });
         }
 
-        self.voted_for = Some(vote_request.candidate.clone());
-        self.state = State::Follower;
+        self.node_state.voted_for = Some(vote_request.candidate.clone());
+        self.node_state.state = State::Follower;
         self.persist_state().await?;
 
         Ok(RequestVoteReplyData {
-            term: self.current_term,
+            term: self.node_state.current_term,
             vote: true,
         })
     }
@@ -75,16 +77,16 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         &mut self,
         vote_reply: RequestVoteReplyData,
     ) -> anyhow::Result<()> {
-        if vote_reply.term > self.current_term {
+        if vote_reply.term > self.node_state.current_term {
             self.step_down(vote_reply.term);
             self.persist_state().await?;
             return Ok(());
-        } else if vote_reply.term < self.current_term {
+        } else if vote_reply.term < self.node_state.current_term {
             // Ignore stale replies
             return Ok(());
         }
 
-        let mut votes = match self.state {
+        let mut votes = match self.node_state.state {
             State::Candidate { votes } => votes,
             _ => {
                 return Ok(());
@@ -92,7 +94,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         };
 
         votes += if vote_reply.vote { 1 } else { 0 };
-        self.state = State::Candidate { votes };
+        self.node_state.state = State::Candidate { votes };
 
         if !self.is_majority(votes) {
             return Ok(());
@@ -131,8 +133,8 @@ mod tests {
             })
             .await?;
         assert!(reply.vote);
-        assert_eq!(node.current_term, 1);
-        assert_eq!(node.state, State::Follower);
+        assert_eq!(node.node_state.current_term, 1);
+        assert_eq!(node.node_state.state, State::Follower);
         Ok(())
     }
 
@@ -148,7 +150,7 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.voted_for = Some("node2".to_string());
+        node.node_state.voted_for = Some("node2".to_string());
         let reply = node
             .handle_vote_request(RequestVoteData {
                 term: 0,
@@ -158,8 +160,8 @@ mod tests {
             })
             .await?;
         assert!(!reply.vote);
-        assert_eq!(node.current_term, 0);
-        assert_eq!(node.state, State::Follower);
+        assert_eq!(node.node_state.current_term, 0);
+        assert_eq!(node.node_state.state, State::Follower);
         Ok(())
     }
 
@@ -175,7 +177,7 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
         });
@@ -188,7 +190,7 @@ mod tests {
             })
             .await?;
         assert!(!reply.vote);
-        assert_eq!(node.current_term, 2);
+        assert_eq!(node.node_state.current_term, 2);
         Ok(())
     }
 
@@ -204,7 +206,7 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
         });
@@ -217,7 +219,7 @@ mod tests {
             })
             .await?;
         assert!(reply.vote);
-        assert_eq!(node.current_term, 2);
+        assert_eq!(node.node_state.current_term, 2);
         Ok(())
     }
 
@@ -233,7 +235,7 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.voted_for = Some("node2".to_string());
+        node.node_state.voted_for = Some("node2".to_string());
         let reply = node
             .handle_vote_request(RequestVoteData {
                 term: 1,
@@ -243,7 +245,7 @@ mod tests {
             })
             .await?;
         assert!(reply.vote);
-        assert_eq!(node.current_term, 1);
+        assert_eq!(node.node_state.current_term, 1);
         Ok(())
     }
 
@@ -259,11 +261,11 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd2".to_string(),
         });
@@ -276,7 +278,7 @@ mod tests {
             })
             .await?;
         assert!(!reply.vote);
-        assert_eq!(node.current_term, 2);
+        assert_eq!(node.node_state.current_term, 2);
         Ok(())
     }
 
@@ -292,7 +294,7 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
         });
@@ -305,7 +307,7 @@ mod tests {
             })
             .await?;
         assert!(!reply.vote);
-        assert_eq!(node.current_term, 2);
+        assert_eq!(node.node_state.current_term, 2);
         Ok(())
     }
 
@@ -321,7 +323,7 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 2;
+        node.node_state.current_term = 2;
         let reply = node
             .handle_vote_request(RequestVoteData {
                 term: 1,
@@ -331,7 +333,7 @@ mod tests {
             })
             .await?;
         assert!(!reply.vote);
-        assert_eq!(node.current_term, 2);
+        assert_eq!(node.node_state.current_term, 2);
         Ok(())
     }
 
@@ -347,11 +349,11 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd2".to_string(),
         });
@@ -364,8 +366,8 @@ mod tests {
             })
             .await?;
         assert!(reply.vote);
-        assert_eq!(node.current_term, 3);
-        assert_eq!(node.state, State::Follower);
+        assert_eq!(node.node_state.current_term, 3);
+        assert_eq!(node.node_state.state, State::Follower);
         Ok(())
     }
 
@@ -381,15 +383,15 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 1;
-        node.state = State::Candidate { votes: 1 };
+        node.node_state.current_term = 1;
+        node.node_state.state = State::Candidate { votes: 1 };
         node.handle_request_vote_reply(RequestVoteReplyData {
             term: 1,
             vote: true,
         })
         .await?;
-        assert_eq!(node.state, State::Leader);
-        assert_eq!(node.current_term, 1);
+        assert_eq!(node.node_state.state, State::Leader);
+        assert_eq!(node.node_state.current_term, 1);
         Ok(())
     }
 
@@ -405,14 +407,14 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 1;
-        node.state = State::Candidate { votes: 1 };
+        node.node_state.current_term = 1;
+        node.node_state.state = State::Candidate { votes: 1 };
         node.handle_request_vote_reply(RequestVoteReplyData {
             term: 1,
             vote: false,
         })
         .await?;
-        assert_eq!(node.state, State::Candidate { votes: 1 });
+        assert_eq!(node.node_state.state, State::Candidate { votes: 1 });
         Ok(())
     }
 }

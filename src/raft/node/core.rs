@@ -1,4 +1,5 @@
 use crate::raft::network_types::OutMsg;
+use crate::raft::node::state::{NodeState, State};
 use crate::raft::node::utils::RandomGenerator;
 use crate::raft::raft_types::{ChangeStateReply, LogEntry, RaftMsg};
 use crate::raft::state_machine::StateMachine;
@@ -9,33 +10,10 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
-#[derive(Debug, PartialEq, Eq, Default, Clone, Copy)]
-pub enum State {
-    Candidate {
-        votes: usize,
-    },
-    Leader,
-    #[default]
-    Follower,
-}
-
 pub struct Node<T, SM: StorageEngine> {
-    pub(super) current_term: u64,
-    pub(super) state: State,
-    pub(super) peers: Vec<String>,
-    pub(super) voted_for: Option<String>,
-    pub(super) entries: Vec<LogEntry>,
+    pub(super) node_state: NodeState,
+
     pub(super) network_inbox: Sender<OutMsg>,
-    pub(super) id: String,
-    pub(super) commit_index: u64,
-
-    pub(super) leader: String,
-    pub(super) last_applied: u64,
-    pub(super) next_index: HashMap<String, u64>,
-    pub(super) match_index: HashMap<String, u64>,
-    pub(super) snapshot_last_index: u64,
-    pub(super) snapshot_last_term: u64,
-
     pub(super) state_machine: StateMachine<SM>,
     pub(super) random_generator: Box<dyn RandomGenerator + Send + Sync>,
     pub(super) pending_clients: HashMap<u64, oneshot::Sender<ChangeStateReply>>,
@@ -52,47 +30,21 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         storage_engine: SM,
         random_generator: Box<dyn RandomGenerator + Send + Sync>,
     ) -> anyhow::Result<Self> {
-        let mut next_index_map = HashMap::new();
-        let mut match_index_map = HashMap::new();
-        for peer in peers.clone() {
-            next_index_map.insert(peer.clone(), 0);
-            match_index_map.insert(peer, 0);
-        }
         let mut node = Node {
-            leader: String::new(),
-            current_term: 0,
-            state: State::default(),
-            peers,
-            voted_for: None,
+            node_state: NodeState::new(id, peers),
             network_inbox,
-            entries: vec![],
-            id,
-            commit_index: 0,
-            last_applied: 0,
-            next_index: next_index_map,
-            match_index: match_index_map,
-            snapshot_last_index: 0,
-            snapshot_last_term: 0,
             state_machine: StateMachine::new(storage_engine),
             pending_clients: HashMap::new(),
             state_persister,
             random_generator,
         };
         let init_node_state = node.state_persister.load_state().await?;
-        node.current_term = init_node_state.current_term;
-        node.voted_for = init_node_state.voted_for;
-        node.entries = init_node_state.entries;
-        node.commit_index = init_node_state.commit_index;
-
-        // Recover state machine
-        // before applying any committed entries to ensure the state machine is up to date
-        // with the latest persisted state
+        node.node_state.current_term = init_node_state.current_term;
+        node.node_state.voted_for = init_node_state.voted_for;
+        node.node_state.entries = init_node_state.entries;
+        node.node_state.commit_index = init_node_state.commit_index;
         node.state_machine.recover().await;
-
-        // last_applied is derived from the WAL: it reflects exactly how many
-        // Raft entries the state machine has durably applied (WAL entry count
-        // equals the 1-based Raft log index of the last applied command).
-        node.last_applied = node.state_machine.last_applied_index();
+        node.node_state.last_applied = node.state_machine.last_applied_index();
 
         // Close the gap left by a crash between a Raft commit and the WAL flush:
         // those entries are committed and still in the log, so they must be
@@ -104,7 +56,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     }
 
     fn reset_election_timer(&self) -> Instant {
-        let duration = if self.state == State::Leader {
+        let duration = if self.node_state.state == State::Leader {
             Duration::from_millis(50)
         } else {
             let rnd_timeout = self.random_generator.range(150, 300);
@@ -126,7 +78,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                     }
                 },
                 () = sleep.as_mut() => {
-                    if self.state == State::Leader {
+                    if self.node_state.state == State::Leader {
                         self.send_heartbeat().await?;
                     }
                     else{
@@ -140,28 +92,28 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
 
     pub(super) async fn persist_state(&self) -> anyhow::Result<()> {
         let persistent_state = PersistentState {
-            current_term: self.current_term,
-            voted_for: self.voted_for.clone(),
-            entries: self.entries.clone(),
-            commit_index: self.commit_index,
+            current_term: self.node_state.current_term,
+            voted_for: self.node_state.voted_for.clone(),
+            entries: self.node_state.entries.clone(),
+            commit_index: self.node_state.commit_index,
         };
         self.state_persister.save_state(&persistent_state).await?;
         Ok(())
     }
 
     pub(super) fn step_down(&mut self, new_term: u64) {
-        self.current_term = new_term;
-        self.voted_for = None;
-        self.state = State::Follower;
+        self.node_state.current_term = new_term;
+        self.node_state.voted_for = None;
+        self.node_state.state = State::Follower;
     }
 
     pub(super) fn become_leader(&mut self) {
         let next_index = self.last_log_index() + 1;
-        for peer in &self.peers {
-            self.next_index.insert(peer.clone(), next_index);
-            self.match_index.insert(peer.clone(), 0);
+        for peer in &self.node_state.peers {
+            self.node_state.next_index.insert(peer.clone(), next_index);
+            self.node_state.match_index.insert(peer.clone(), 0);
         }
-        self.state = State::Leader;
+        self.node_state.state = State::Leader;
     }
 
     pub(super) async fn handle_message(&mut self, msg: RaftMsg) -> anyhow::Result<bool> {
@@ -203,36 +155,37 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                 command,
                 reply_channel,
             } => {
-                if !matches!(self.state, State::Leader) {
+                if !matches!(self.node_state.state, State::Leader) {
                     let reply = ChangeStateReply {
                         success: false,
-                        leader: self.leader.clone(),
+                        leader: self.node_state.leader.clone(),
                     };
                     self.send_to_reply_channel(reply_channel, reply)?;
                 } else {
                     let prev_log_index = self.last_log_index();
                     let prev_log_term = self
+                        .node_state
                         .entries
                         .last()
-                        .map_or(self.snapshot_last_term, |e| e.term);
+                        .map_or(self.node_state.snapshot_last_term, |e| e.term);
 
-                    self.entries.push(LogEntry {
-                        term: self.current_term,
+                    self.node_state.entries.push(LogEntry {
+                        term: self.node_state.current_term,
                         command: command.clone(),
                     });
                     self.persist_state()
                         .await
                         .expect("Failed to persist state after adding new command");
-                    for peer in &self.peers {
+                    for peer in &self.node_state.peers {
                         let append_entries = OutMsg::AppendEntries {
-                            term: self.current_term,
+                            term: self.node_state.current_term,
                             peer: peer.clone(),
                             prev_log_index,
                             prev_log_term,
-                            leader_commit: self.commit_index,
-                            leader_id: self.id.clone(),
+                            leader_commit: self.node_state.commit_index,
+                            leader_id: self.node_state.id.clone(),
                             entries: vec![LogEntry {
-                                term: self.current_term,
+                                term: self.node_state.current_term,
                                 command: command.clone(),
                             }],
                         };
@@ -262,11 +215,11 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     }
 
     pub(super) async fn apply_commands(&mut self) -> anyhow::Result<()> {
-        if self.commit_index <= self.last_applied {
+        if self.node_state.commit_index <= self.node_state.last_applied {
             return Ok(());
         }
 
-        for i in self.last_applied + 1..=self.commit_index {
+        for i in self.node_state.last_applied + 1..=self.node_state.commit_index {
             let command = self
                 .get_log_entry(i)
                 .expect("committed entry missing from log")
@@ -274,12 +227,12 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                 .clone();
 
             self.state_machine.apply(command).await?;
-            self.last_applied = i;
+            self.node_state.last_applied = i;
 
             let reply_channel = self.pending_clients.remove(&i);
             let reply = ChangeStateReply {
                 success: true,
-                leader: self.id.clone(),
+                leader: self.node_state.id.clone(),
             };
             self.send_to_reply_channel(reply_channel, reply)?;
         }
@@ -288,7 +241,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     }
 
     pub(super) fn is_majority(&self, count: usize) -> bool {
-        count > self.peers.len().div_ceil(2)
+        count > self.node_state.peers.len().div_ceil(2)
     }
 
     pub(super) fn send_to_reply_channel<R>(
@@ -348,14 +301,14 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(node.current_term, 7);
-        assert_eq!(node.voted_for, Some("node3".to_string()));
-        assert_eq!(node.entries.len(), 2);
-        assert_eq!(node.entries[0].term, 5);
-        assert_eq!(node.entries[0].command, "set key1 val1");
-        assert_eq!(node.entries[1].term, 7);
-        assert_eq!(node.entries[1].command, "set key2 val2");
-        assert_eq!(node.commit_index, 2);
+        assert_eq!(node.node_state.current_term, 7);
+        assert_eq!(node.node_state.voted_for, Some("node3".to_string()));
+        assert_eq!(node.node_state.entries.len(), 2);
+        assert_eq!(node.node_state.entries[0].term, 5);
+        assert_eq!(node.node_state.entries[0].command, "set key1 val1");
+        assert_eq!(node.node_state.entries[1].term, 7);
+        assert_eq!(node.node_state.entries[1].command, "set key2 val2");
+        assert_eq!(node.node_state.commit_index, 2);
         Ok(())
     }
 
@@ -408,7 +361,7 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(node.last_applied, 2);
+        assert_eq!(node.node_state.last_applied, 2);
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
         assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
         Ok(())
@@ -448,9 +401,9 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(node.last_applied, 2);
+        assert_eq!(node.node_state.last_applied, 2);
         node.apply_commands().await?;
-        assert_eq!(node.last_applied, 2);
+        assert_eq!(node.node_state.last_applied, 2);
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val2");
         Ok(())
     }
@@ -487,8 +440,8 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(node.last_applied, 2);
-        assert_eq!(node.commit_index, 2);
+        assert_eq!(node.node_state.last_applied, 2);
+        assert_eq!(node.node_state.commit_index, 2);
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
         assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
         Ok(())
@@ -523,7 +476,7 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        assert_eq!(node.last_applied, 0);
+        assert_eq!(node.node_state.last_applied, 0);
         assert!(node.state_machine.get("key1").await.is_none());
 
         node.handle_message(RaftMsg::AppendEntries {
@@ -539,8 +492,8 @@ mod tests {
         })
         .await?;
 
-        assert_eq!(node.commit_index, 2);
-        assert_eq!(node.last_applied, 2);
+        assert_eq!(node.node_state.commit_index, 2);
+        assert_eq!(node.node_state.last_applied, 2);
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
         assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
         Ok(())
@@ -558,18 +511,18 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 1;
-        node.state = State::Leader;
-        node.commit_index = 3;
-        node.entries.push(LogEntry {
+        node.node_state.current_term = 1;
+        node.node_state.state = State::Leader;
+        node.node_state.commit_index = 3;
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "set key1 val1".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "set key2 val2".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "set key1 val3".to_string(),
         });
@@ -588,7 +541,7 @@ mod tests {
         assert!(res1.success);
         assert!(res2.success);
         assert!(res3.success);
-        assert_eq!(node.last_applied, node.commit_index);
+        assert_eq!(node.node_state.last_applied, node.node_state.commit_index);
         Ok(())
     }
 
@@ -605,23 +558,23 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 1;
-        node.state = State::Leader;
-        node.commit_index = 3;
-        node.last_applied = 1;
+        node.node_state.current_term = 1;
+        node.node_state.state = State::Leader;
+        node.node_state.commit_index = 3;
+        node.node_state.last_applied = 1;
         node.state_machine
             .apply("set key1 val1".to_string())
             .await
             .unwrap();
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "set key1 val3".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "set key2 val2".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "set key3 val3".to_string(),
         });
@@ -639,7 +592,7 @@ mod tests {
         assert_eq!(node.state_machine.get("key3").await.unwrap(), "val3");
         assert!(res2.success);
         assert!(res3.success);
-        assert_eq!(node.last_applied, node.commit_index);
+        assert_eq!(node.node_state.last_applied, node.node_state.commit_index);
         Ok(())
     }
 
@@ -656,8 +609,8 @@ mod tests {
         )
         .await?;
 
-        node.current_term = 2;
-        node.state = State::Follower;
+        node.node_state.current_term = 2;
+        node.node_state.state = State::Follower;
 
         let reset_timer = node
             .handle_message(RaftMsg::AppendEntries {
@@ -703,7 +656,7 @@ mod tests {
             .await?;
 
         assert!(reset_timer);
-        assert_eq!(node.voted_for, Some("node2".to_string()));
+        assert_eq!(node.node_state.voted_for, Some("node2".to_string()));
         Ok(())
     }
 
@@ -746,8 +699,8 @@ mod tests {
         )
         .await?;
 
-        node.current_term = 1;
-        node.state = State::Candidate { votes: 1 };
+        node.node_state.current_term = 1;
+        node.node_state.state = State::Candidate { votes: 1 };
 
         let reset_timer = node
             .handle_message(RaftMsg::RequestVoteReply {

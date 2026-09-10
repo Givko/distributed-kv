@@ -5,21 +5,22 @@ use crate::raft::state_persister::Persister;
 
 impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     pub(super) fn last_log_index(&self) -> u64 {
-        self.snapshot_last_index + self.entries.len() as u64
+        self.node_state.snapshot_last_index + self.node_state.entries.len() as u64
     }
 
     pub(super) fn get_log_entry(&self, index: u64) -> Option<&LogEntry> {
-        if index <= self.snapshot_last_index {
+        if index <= self.node_state.snapshot_last_index {
             None
         } else {
-            self.entries
-                .get((index - self.snapshot_last_index - 1) as usize)
+            self.node_state
+                .entries
+                .get((index - self.node_state.snapshot_last_index - 1) as usize)
         }
     }
 
     pub(super) fn get_log_term(&self, index: u64) -> u64 {
-        if index == self.snapshot_last_index {
-            self.snapshot_last_term
+        if index == self.node_state.snapshot_last_index {
+            self.node_state.snapshot_last_term
         } else {
             self.get_log_entry(index).map_or(0, |e| e.term)
         }

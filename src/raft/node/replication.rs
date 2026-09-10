@@ -6,19 +6,20 @@ use crate::raft::state_persister::Persister;
 
 impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     pub(super) async fn send_heartbeat(&self) -> anyhow::Result<()> {
-        for peer in &self.peers {
+        for peer in &self.node_state.peers {
             let prev_log_index = self.last_log_index();
             let prev_log_term = self
+                .node_state
                 .entries
                 .last()
-                .map_or(self.snapshot_last_term, |e| e.term);
+                .map_or(self.node_state.snapshot_last_term, |e| e.term);
             let out_msg = OutMsg::AppendEntries {
-                term: self.current_term,
-                leader_id: self.id.clone(),
+                term: self.node_state.current_term,
+                leader_id: self.node_state.id.clone(),
                 entries: vec![],
                 prev_log_index,
                 prev_log_term,
-                leader_commit: self.commit_index,
+                leader_commit: self.node_state.commit_index,
                 peer: peer.clone(),
             };
             self.network_inbox.send(out_msg).await?;
@@ -30,57 +31,59 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         &mut self,
         append_request: AppendEntriesData,
     ) -> anyhow::Result<AppendEntriesReplyData> {
-        if self.current_term > append_request.term
+        if self.node_state.current_term > append_request.term
             || self.last_log_index() < append_request.prev_log_index
             || (append_request.prev_log_index != 0
                 && self.get_log_term(append_request.prev_log_index) != append_request.prev_log_term)
         {
-            if self.current_term < append_request.term {
-                self.state = State::Follower;
-                self.current_term = append_request.term;
+            if self.node_state.current_term < append_request.term {
+                self.node_state.state = State::Follower;
+                self.node_state.current_term = append_request.term;
             }
 
             self.persist_state().await?;
             return Ok(AppendEntriesReplyData {
-                term: self.current_term,
+                term: self.node_state.current_term,
                 success: false,
-                peer: self.id.clone(),
+                peer: self.node_state.id.clone(),
                 entries_count: 0,
             });
         }
 
-        if self.current_term < append_request.term {
-            self.current_term = append_request.term;
-            self.voted_for = None;
+        if self.node_state.current_term < append_request.term {
+            self.node_state.current_term = append_request.term;
+            self.node_state.voted_for = None;
         }
 
-        if self.state != State::Follower {
-            self.leader = append_request.leader_id.clone();
-            self.state = State::Follower;
+        if self.node_state.state != State::Follower {
+            self.node_state.leader = append_request.leader_id.clone();
+            self.node_state.state = State::Follower;
         }
 
         if append_request.prev_log_index != 0
             && self.last_log_index() > append_request.prev_log_index
-            && append_request.prev_log_index >= self.snapshot_last_index
+            && append_request.prev_log_index >= self.node_state.snapshot_last_index
         {
-            let truncate_to = (append_request.prev_log_index - self.snapshot_last_index) as usize;
-            self.entries.truncate(truncate_to);
+            let truncate_to =
+                (append_request.prev_log_index - self.node_state.snapshot_last_index) as usize;
+            self.node_state.entries.truncate(truncate_to);
         }
 
         let entries_count = append_request.entries.len();
         for entry in append_request.entries {
-            self.entries.push(entry);
+            self.node_state.entries.push(entry);
         }
 
-        if append_request.leader_commit > self.commit_index {
-            self.commit_index = std::cmp::min(self.last_log_index(), append_request.leader_commit);
+        if append_request.leader_commit > self.node_state.commit_index {
+            self.node_state.commit_index =
+                std::cmp::min(self.last_log_index(), append_request.leader_commit);
         }
 
         self.persist_state().await?;
         Ok(AppendEntriesReplyData {
-            term: self.current_term,
+            term: self.node_state.current_term,
             success: true,
-            peer: self.id.clone(),
+            peer: self.node_state.id.clone(),
             entries_count: entries_count as u64,
         })
     }
@@ -91,6 +94,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     ) -> anyhow::Result<()> {
         if append_entries_reply_data.success {
             let prev_log_index = *self
+                .node_state
                 .next_index
                 .get(&append_entries_reply_data.peer)
                 .expect("no peer found")
@@ -98,23 +102,26 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
 
             let match_index = prev_log_index + append_entries_reply_data.entries_count;
             let next_index = match_index + 1;
-            self.next_index
+            self.node_state
+                .next_index
                 .insert(append_entries_reply_data.peer.clone(), next_index);
-            self.match_index
+            self.node_state
+                .match_index
                 .insert(append_entries_reply_data.peer.clone(), match_index);
 
-            for log_index in self.commit_index + 1..=self.last_log_index() {
+            for log_index in self.node_state.commit_index + 1..=self.last_log_index() {
                 let mut count = 1; // self
-                for (_, value) in self.match_index.iter() {
+                for (_, value) in self.node_state.match_index.iter() {
                     if *value >= log_index {
                         count += 1;
                     }
                 }
 
                 if self.is_majority(count)
-                    && self.get_log_entry(log_index).map_or(0, |e| e.term) == self.current_term
+                    && self.get_log_entry(log_index).map_or(0, |e| e.term)
+                        == self.node_state.current_term
                 {
-                    self.commit_index = log_index;
+                    self.node_state.commit_index = log_index;
                 }
             }
 
@@ -122,13 +129,14 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             return Ok(());
         }
 
-        if self.current_term < append_entries_reply_data.term {
+        if self.node_state.current_term < append_entries_reply_data.term {
             self.step_down(append_entries_reply_data.term);
             self.persist_state().await?;
             return Ok(());
         }
 
         let mut next_index = *self
+            .node_state
             .next_index
             .get(&append_entries_reply_data.peer)
             .expect("no peer found in state");
@@ -141,10 +149,11 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         let prev_log_term = self.get_log_term(prev_log_index);
 
         // TODO: if prev_log_index < snapshot_last_index, we need InstallSnapshot instead
-        let start_index = (prev_log_index.saturating_sub(self.snapshot_last_index) as usize)
-            .min(self.entries.len());
+        let start_index = (prev_log_index.saturating_sub(self.node_state.snapshot_last_index)
+            as usize)
+            .min(self.node_state.entries.len());
 
-        let entries_to_send: Vec<LogEntry> = self.entries[start_index..]
+        let entries_to_send: Vec<LogEntry> = self.node_state.entries[start_index..]
             .iter()
             .map(|e| LogEntry {
                 term: e.term,
@@ -152,16 +161,17 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             })
             .collect();
 
-        self.next_index
+        self.node_state
+            .next_index
             .insert(append_entries_reply_data.peer.clone(), next_index);
 
         let append_entries = OutMsg::AppendEntries {
-            term: self.current_term,
+            term: self.node_state.current_term,
             peer: append_entries_reply_data.peer,
             prev_log_index,
             prev_log_term,
-            leader_commit: self.commit_index,
-            leader_id: self.id.clone(),
+            leader_commit: self.node_state.commit_index,
+            leader_id: self.node_state.id.clone(),
             entries: entries_to_send,
         };
 
@@ -199,8 +209,8 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.state = State::Leader;
-        node.current_term = 3;
+        node.node_state.state = State::Leader;
+        node.node_state.current_term = 3;
         node.handle_message(RaftMsg::ChangeState {
             command: "set key1 value1".to_string(),
             reply_channel: None,
@@ -227,9 +237,9 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 4;
-        node.snapshot_last_index = 5;
-        node.snapshot_last_term = 3;
+        node.node_state.current_term = 4;
+        node.node_state.snapshot_last_index = 5;
+        node.node_state.snapshot_last_term = 3;
         let reply = node
             .handle_append_entries(AppendEntriesData {
                 term: 4,
@@ -244,9 +254,9 @@ mod tests {
             })
             .await?;
         assert!(reply.success);
-        assert_eq!(node.entries.len(), 1);
+        assert_eq!(node.node_state.entries.len(), 1);
         assert_eq!(node.last_log_index(), 6);
-        assert_eq!(node.commit_index, 6);
+        assert_eq!(node.node_state.commit_index, 6);
         Ok(())
     }
 
@@ -263,9 +273,9 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 4;
-        node.snapshot_last_index = 5;
-        node.snapshot_last_term = 3;
+        node.node_state.current_term = 4;
+        node.node_state.snapshot_last_index = 5;
+        node.node_state.snapshot_last_term = 3;
         let reply = node
             .handle_append_entries(AppendEntriesData {
                 term: 4,
@@ -280,7 +290,7 @@ mod tests {
             })
             .await?;
         assert!(!reply.success);
-        assert!(node.entries.is_empty());
+        assert!(node.node_state.entries.is_empty());
         assert_eq!(node.last_log_index(), 5);
         Ok(())
     }
@@ -297,8 +307,8 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 1;
-        node.state = State::Leader;
+        node.node_state.current_term = 1;
+        node.node_state.state = State::Leader;
         let reply = node
             .handle_append_entries(AppendEntriesData {
                 term: 2,
@@ -310,8 +320,8 @@ mod tests {
             })
             .await?;
         assert!(reply.success);
-        assert_eq!(node.current_term, 2);
-        assert_eq!(node.state, State::Follower);
+        assert_eq!(node.node_state.current_term, 2);
+        assert_eq!(node.node_state.state, State::Follower);
         Ok(())
     }
 
@@ -327,8 +337,8 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 1;
-        node.state = State::Leader;
+        node.node_state.current_term = 1;
+        node.node_state.state = State::Leader;
         let reply = node
             .handle_append_entries(AppendEntriesData {
                 term: 2,
@@ -340,8 +350,8 @@ mod tests {
             })
             .await?;
         assert!(reply.success);
-        assert_eq!(node.current_term, 2);
-        assert_eq!(node.state, State::Follower);
+        assert_eq!(node.node_state.current_term, 2);
+        assert_eq!(node.node_state.state, State::Follower);
         Ok(())
     }
 
@@ -357,8 +367,8 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 2;
-        node.state = State::Leader;
+        node.node_state.current_term = 2;
+        node.node_state.state = State::Leader;
         let reply = node
             .handle_append_entries(AppendEntriesData {
                 term: 1,
@@ -370,8 +380,8 @@ mod tests {
             })
             .await?;
         assert!(!reply.success);
-        assert_eq!(node.current_term, 2);
-        assert_eq!(node.state, State::Leader);
+        assert_eq!(node.node_state.current_term, 2);
+        assert_eq!(node.node_state.state, State::Leader);
         Ok(())
     }
 
@@ -387,8 +397,8 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 2;
-        node.state = State::Leader;
+        node.node_state.current_term = 2;
+        node.node_state.state = State::Leader;
         let reply = node
             .handle_append_entries(AppendEntriesData {
                 term: 3,
@@ -400,8 +410,8 @@ mod tests {
             })
             .await?;
         assert!(!reply.success);
-        assert_eq!(node.current_term, 3);
-        assert_eq!(node.state, State::Follower);
+        assert_eq!(node.node_state.current_term, 3);
+        assert_eq!(node.node_state.state, State::Follower);
         Ok(())
     }
 
@@ -417,9 +427,9 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 2;
-        node.state = State::Leader;
-        node.entries.push(LogEntry {
+        node.node_state.current_term = 2;
+        node.node_state.state = State::Leader;
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
         });
@@ -434,8 +444,8 @@ mod tests {
             })
             .await?;
         assert!(!reply.success);
-        assert_eq!(node.current_term, 3);
-        assert_eq!(node.state, State::Follower);
+        assert_eq!(node.node_state.current_term, 3);
+        assert_eq!(node.node_state.state, State::Follower);
         Ok(())
     }
 
@@ -451,9 +461,9 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 2;
-        node.state = State::Follower;
-        node.entries.push(LogEntry {
+        node.node_state.current_term = 2;
+        node.node_state.state = State::Follower;
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
         });
@@ -471,10 +481,10 @@ mod tests {
             })
             .await?;
         assert!(reply.success);
-        assert_eq!(node.entries.len(), 2);
-        assert_eq!(node.entries[1].term, 2);
-        assert_eq!(node.entries[1].command, "cmd2");
-        assert_eq!(node.commit_index, 0);
+        assert_eq!(node.node_state.entries.len(), 2);
+        assert_eq!(node.node_state.entries[1].term, 2);
+        assert_eq!(node.node_state.entries[1].command, "cmd2");
+        assert_eq!(node.node_state.commit_index, 0);
         Ok(())
     }
 
@@ -490,13 +500,13 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 2;
-        node.state = State::Follower;
-        node.entries.push(LogEntry {
+        node.node_state.current_term = 2;
+        node.node_state.state = State::Follower;
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 2,
             command: "cmd2".to_string(),
         });
@@ -514,10 +524,10 @@ mod tests {
             })
             .await?;
         assert!(reply.success);
-        assert_eq!(node.entries.len(), 2);
-        assert_eq!(node.entries[1].term, 3);
-        assert_eq!(node.entries[1].command, "cmd3");
-        assert_eq!(node.commit_index, 0);
+        assert_eq!(node.node_state.entries.len(), 2);
+        assert_eq!(node.node_state.entries[1].term, 3);
+        assert_eq!(node.node_state.entries[1].command, "cmd3");
+        assert_eq!(node.node_state.commit_index, 0);
         Ok(())
     }
 
@@ -534,13 +544,13 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 2;
-        node.state = State::Follower;
-        node.entries.push(LogEntry {
+        node.node_state.current_term = 2;
+        node.node_state.state = State::Follower;
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 2,
             command: "cmd2".to_string(),
         });
@@ -555,8 +565,8 @@ mod tests {
             })
             .await?;
         assert!(reply.success);
-        assert_eq!(node.entries.len(), 2);
-        assert_eq!(node.commit_index, 2);
+        assert_eq!(node.node_state.entries.len(), 2);
+        assert_eq!(node.node_state.commit_index, 2);
         Ok(())
     }
 
@@ -572,13 +582,13 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 2;
-        node.state = State::Follower;
-        node.entries.push(LogEntry {
+        node.node_state.current_term = 2;
+        node.node_state.state = State::Follower;
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 2,
             command: "cmd2".to_string(),
         });
@@ -593,8 +603,8 @@ mod tests {
             })
             .await?;
         assert!(reply.success);
-        assert_eq!(node.entries.len(), 2);
-        assert_eq!(node.commit_index, 2);
+        assert_eq!(node.node_state.entries.len(), 2);
+        assert_eq!(node.node_state.commit_index, 2);
         Ok(())
     }
 
@@ -611,13 +621,13 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 2;
-        node.state = State::Follower;
-        node.entries.push(LogEntry {
+        node.node_state.current_term = 2;
+        node.node_state.state = State::Follower;
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 2,
             command: "cmd2".to_string(),
         });
@@ -635,10 +645,10 @@ mod tests {
             })
             .await?;
         assert!(reply.success);
-        assert_eq!(node.entries.len(), 3);
-        assert_eq!(node.entries[2].term, 3);
-        assert_eq!(node.entries[2].command, "cmd3");
-        assert_eq!(node.commit_index, 3);
+        assert_eq!(node.node_state.entries.len(), 3);
+        assert_eq!(node.node_state.entries[2].term, 3);
+        assert_eq!(node.node_state.entries[2].command, "cmd3");
+        assert_eq!(node.node_state.commit_index, 3);
         Ok(())
     }
 
@@ -654,9 +664,9 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 2;
-        node.voted_for = Some("node2".to_string());
-        node.state = State::Follower;
+        node.node_state.current_term = 2;
+        node.node_state.voted_for = Some("node2".to_string());
+        node.node_state.state = State::Follower;
         let reply = node
             .handle_append_entries(AppendEntriesData {
                 term: 2,
@@ -668,8 +678,8 @@ mod tests {
             })
             .await?;
         assert!(reply.success);
-        assert_eq!(node.voted_for, Some("node2".to_string()));
-        assert_eq!(node.current_term, 2);
+        assert_eq!(node.node_state.voted_for, Some("node2".to_string()));
+        assert_eq!(node.node_state.current_term, 2);
         Ok(())
     }
 
@@ -685,8 +695,8 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 1;
-        node.state = State::Leader;
+        node.node_state.current_term = 1;
+        node.node_state.state = State::Leader;
         node.handle_append_entries_reply(AppendEntriesReplyData {
             term: 2,
             success: false,
@@ -694,8 +704,8 @@ mod tests {
             entries_count: 0,
         })
         .await?;
-        assert_eq!(node.current_term, 2);
-        assert_eq!(node.state, State::Follower);
+        assert_eq!(node.node_state.current_term, 2);
+        assert_eq!(node.node_state.state, State::Follower);
         Ok(())
     }
 
@@ -711,9 +721,9 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 2;
-        node.state = State::Leader;
-        node.next_index.insert("test".to_owned(), 1);
+        node.node_state.current_term = 2;
+        node.node_state.state = State::Leader;
+        node.node_state.next_index.insert("test".to_owned(), 1);
         node.handle_append_entries_reply(AppendEntriesReplyData {
             term: 1,
             success: false,
@@ -721,9 +731,9 @@ mod tests {
             entries_count: 0,
         })
         .await?;
-        assert_eq!(node.current_term, 2);
-        assert_eq!(node.state, State::Leader);
-        assert_eq!(*node.next_index.get("test").unwrap(), 1);
+        assert_eq!(node.node_state.current_term, 2);
+        assert_eq!(node.node_state.state, State::Leader);
+        assert_eq!(*node.node_state.next_index.get("test").unwrap(), 1);
         Ok(())
     }
 
@@ -740,22 +750,22 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 2;
-        node.next_index.insert("test".to_owned(), 3);
-        node.state = State::Leader;
-        node.entries.push(LogEntry {
+        node.node_state.current_term = 2;
+        node.node_state.next_index.insert("test".to_owned(), 3);
+        node.node_state.state = State::Leader;
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 2,
             command: "cmd2".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd3".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 2,
             command: "cmd4".to_string(),
         });
@@ -766,7 +776,7 @@ mod tests {
             entries_count: 0,
         })
         .await?;
-        assert_eq!(*node.next_index.get("test").unwrap(), 2);
+        assert_eq!(*node.node_state.next_index.get("test").unwrap(), 2);
         Ok(())
     }
 
@@ -782,22 +792,22 @@ mod tests {
             Box::new(RandGen),
         )
         .await?;
-        node.current_term = 2;
-        node.next_index.insert("test".to_owned(), 1);
-        node.state = State::Leader;
-        node.entries.push(LogEntry {
+        node.node_state.current_term = 2;
+        node.node_state.next_index.insert("test".to_owned(), 1);
+        node.node_state.state = State::Leader;
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd1".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 2,
             command: "cmd2".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 1,
             command: "cmd3".to_string(),
         });
-        node.entries.push(LogEntry {
+        node.node_state.entries.push(LogEntry {
             term: 2,
             command: "cmd4".to_string(),
         });
@@ -808,7 +818,7 @@ mod tests {
             entries_count: 0,
         })
         .await?;
-        assert_eq!(*node.next_index.get("test").unwrap(), 1);
+        assert_eq!(*node.node_state.next_index.get("test").unwrap(), 1);
         Ok(())
     }
 }
