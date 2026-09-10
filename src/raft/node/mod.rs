@@ -5,4 +5,5 @@ mod replication;
 #[cfg(test)]
 mod test_helpers;
 
+pub mod utils;
 pub use core::{Node, State};

@@ -107,6 +107,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
 mod tests {
     use super::*;
     use crate::raft::node::test_helpers::{LSMTree, TestPersister};
+    use crate::raft::node::utils::RandGen;
     use crate::raft::raft_types::LogEntry;
 
     #[tokio::test]
@@ -118,6 +119,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         let reply = node
@@ -143,6 +145,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.voted_for = Some("node2".to_string());
@@ -169,6 +172,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.entries.push(LogEntry {
@@ -197,6 +201,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.entries.push(LogEntry {
@@ -225,6 +230,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.voted_for = Some("node2".to_string());
@@ -250,6 +256,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.entries.push(LogEntry {
@@ -282,6 +289,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.entries.push(LogEntry {
@@ -310,6 +318,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 2;
@@ -335,6 +344,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.entries.push(LogEntry {
@@ -368,6 +378,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 1;
@@ -391,6 +402,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 1;

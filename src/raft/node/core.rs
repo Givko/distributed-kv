@@ -1,11 +1,12 @@
 use crate::raft::network_types::OutMsg;
+use crate::raft::node::utils::RandomGenerator;
 use crate::raft::raft_types::{ChangeStateReply, LogEntry, RaftMsg};
 use crate::raft::state_machine::StateMachine;
 use crate::raft::state_machine::StorageEngine;
 use crate::raft::state_persister::{PersistentState, Persister};
-use rand::Rng;
 use std::{collections::HashMap, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 #[derive(Debug, PartialEq, Eq, Default, Clone, Copy)]
@@ -36,7 +37,8 @@ pub struct Node<T, SM: StorageEngine> {
     pub(super) snapshot_last_term: u64,
 
     pub(super) state_machine: StateMachine<SM>,
-    pub(super) pending_clients: HashMap<u64, tokio::sync::oneshot::Sender<ChangeStateReply>>,
+    pub(super) random_generator: Box<dyn RandomGenerator + Send + Sync>,
+    pub(super) pending_clients: HashMap<u64, oneshot::Sender<ChangeStateReply>>,
 
     pub(super) state_persister: T,
 }
@@ -48,6 +50,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         id: String,
         state_persister: T,
         storage_engine: SM,
+        random_generator: Box<dyn RandomGenerator + Send + Sync>,
     ) -> anyhow::Result<Self> {
         let mut next_index_map = HashMap::new();
         let mut match_index_map = HashMap::new();
@@ -73,6 +76,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             state_machine: StateMachine::new(storage_engine),
             pending_clients: HashMap::new(),
             state_persister,
+            random_generator,
         };
         let init_node_state = node.state_persister.load_state().await?;
         node.current_term = init_node_state.current_term;
@@ -103,8 +107,8 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         let duration = if self.state == State::Leader {
             Duration::from_millis(50)
         } else {
-            let mut rng = rand::rng();
-            Duration::from_millis(rng.random_range(150..300))
+            let rnd_timeout = self.random_generator.range(150, 300);
+            Duration::from_millis(rnd_timeout)
         };
         Instant::now() + duration
     }
@@ -307,6 +311,7 @@ mod tests {
     use crate::raft::node::test_helpers::{
         FailingLoadPersister, LSMTree, LoadedStatePersister, PreloadedMockWal, TestPersister,
     };
+    use crate::raft::node::utils::RandGen;
     use crate::raft::raft_types::{AppendEntriesData, RequestVoteData, RequestVoteReplyData};
     use crate::raft::state_persister::PersistentState;
     use crate::storage::entry::Entry as WalEntry;
@@ -339,6 +344,7 @@ mod tests {
             "node1".to_string(),
             persister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
 
@@ -362,6 +368,7 @@ mod tests {
             "node1".to_string(),
             FailingLoadPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await;
         assert!(result.is_err());
@@ -397,6 +404,7 @@ mod tests {
             "node1".to_string(),
             persister,
             RealLSMTree::with_wal(wal),
+            Box::new(RandGen),
         )
         .await?;
 
@@ -436,6 +444,7 @@ mod tests {
             "node1".to_string(),
             persister,
             RealLSMTree::with_wal(wal),
+            Box::new(RandGen),
         )
         .await?;
 
@@ -474,6 +483,7 @@ mod tests {
             "node1".to_string(),
             persister,
             RealLSMTree::with_wal(wal),
+            Box::new(RandGen),
         )
         .await?;
 
@@ -510,6 +520,7 @@ mod tests {
             "node1".to_string(),
             persister,
             RealLSMTree::with_wal(PreloadedMockWal(vec![])),
+            Box::new(RandGen),
         )
         .await?;
         assert_eq!(node.last_applied, 0);
@@ -544,6 +555,7 @@ mod tests {
             "self".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 1;
@@ -590,6 +602,7 @@ mod tests {
             "self".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 1;
@@ -612,11 +625,13 @@ mod tests {
             term: 1,
             command: "set key3 val3".to_string(),
         });
+
         let (snd2, rcv2) = tokio::sync::oneshot::channel::<ChangeStateReply>();
         let (snd3, rcv3) = tokio::sync::oneshot::channel::<ChangeStateReply>();
         node.pending_clients.insert(2, snd2);
         node.pending_clients.insert(3, snd3);
         node.apply_commands().await?;
+
         let res2 = rcv2.await?;
         let res3 = rcv3.await?;
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
@@ -637,6 +652,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
 
@@ -670,6 +686,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
 
@@ -699,6 +716,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
 
@@ -724,6 +742,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
 

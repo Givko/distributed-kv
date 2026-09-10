@@ -174,6 +174,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
 mod tests {
     use super::*;
     use crate::raft::node::test_helpers::{LSMTree, RecordingPersister, TestPersister};
+    use crate::raft::node::utils::RandGen;
     use crate::raft::raft_types::RaftMsg;
     use std::sync::{Arc, Mutex};
 
@@ -195,6 +196,7 @@ mod tests {
             "node1".to_string(),
             persister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.state = State::Leader;
@@ -222,6 +224,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 4;
@@ -257,6 +260,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 4;
@@ -290,6 +294,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 1;
@@ -319,6 +324,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 1;
@@ -348,6 +354,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 2;
@@ -377,6 +384,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 2;
@@ -406,6 +414,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 2;
@@ -439,6 +448,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 2;
@@ -477,6 +487,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 2;
@@ -520,6 +531,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 2;
@@ -557,6 +569,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 2;
@@ -595,6 +608,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 2;
@@ -637,6 +651,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 2;
@@ -667,6 +682,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 1;
@@ -692,6 +708,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 2;
@@ -720,6 +737,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 2;
@@ -761,6 +779,7 @@ mod tests {
             "node1".to_string(),
             TestPersister,
             LSMTree::new(),
+            Box::new(RandGen),
         )
         .await?;
         node.current_term = 2;
