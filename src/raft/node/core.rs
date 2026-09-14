@@ -64,6 +64,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         };
         Instant::now() + duration
     }
+
     pub async fn run(mut self, mut inbox: Receiver<RaftMsg>) -> anyhow::Result<()> {
         let sleep = tokio::time::sleep(Duration::from_millis(0));
         tokio::pin!(sleep);
@@ -173,6 +174,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                         term: self.node_state.current_term,
                         command: command.clone(),
                     });
+                    self.advance_commit_index();
                     self.persist_state()
                         .await
                         .expect("Failed to persist state after adding new command");

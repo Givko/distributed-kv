@@ -27,6 +27,27 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         Ok(())
     }
 
+    /// Moves `commit_index` to the highest current-term entry replicated on a
+    /// majority. In a single-node cluster the leader alone is a majority, so
+    /// this commits new entries without waiting for any reply.
+    pub(super) fn advance_commit_index(&mut self) {
+        for log_index in self.node_state.commit_index + 1..=self.last_log_index() {
+            let mut count = 1; // self
+            for (_, value) in self.node_state.match_index.iter() {
+                if *value >= log_index {
+                    count += 1;
+                }
+            }
+
+            if self.is_majority(count)
+                && self.get_log_entry(log_index).map_or(0, |e| e.term)
+                    == self.node_state.current_term
+            {
+                self.node_state.commit_index = log_index;
+            }
+        }
+    }
+
     pub(super) async fn handle_append_entries(
         &mut self,
         append_request: AppendEntriesData,
@@ -109,22 +130,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                 .match_index
                 .insert(append_entries_reply_data.peer.clone(), match_index);
 
-            for log_index in self.node_state.commit_index + 1..=self.last_log_index() {
-                let mut count = 1; // self
-                for (_, value) in self.node_state.match_index.iter() {
-                    if *value >= log_index {
-                        count += 1;
-                    }
-                }
-
-                if self.is_majority(count)
-                    && self.get_log_entry(log_index).map_or(0, |e| e.term)
-                        == self.node_state.current_term
-                {
-                    self.node_state.commit_index = log_index;
-                }
-            }
-
+            self.advance_commit_index();
             self.persist_state().await?;
             return Ok(());
         }

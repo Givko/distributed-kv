@@ -18,6 +18,14 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             .map_or(self.node_state.snapshot_last_term, |e| e.term);
 
         self.persist_state().await?;
+
+        // The self-vote alone is a majority in a single-node cluster, and no
+        // vote replies will ever arrive to trigger the check below.
+        if self.is_majority(1) {
+            self.become_leader();
+            return Ok(());
+        }
+
         for peer in peers {
             let out_msg = OutMsg::RequestVote {
                 term: self.node_state.current_term,
@@ -60,6 +68,15 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             return Ok(RequestVoteReplyData {
                 term: self.node_state.current_term,
                 vote: false,
+            });
+        }
+
+        // Duplicate request from the candidate we already voted for this term:
+        // nothing changes, so skip the redundant persist.
+        if voted_for_candidate {
+            return Ok(RequestVoteReplyData {
+                term: self.node_state.current_term,
+                vote: true,
             });
         }
 
