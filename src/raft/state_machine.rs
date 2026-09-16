@@ -10,7 +10,7 @@ pub trait StorageEngine {
     /// it exists, or `Some(Entry::Tombstone)` if it was deleted.
     async fn get(&self, key: &[u8]) -> Option<MemTableEntry>;
 
-    async fn recover(&mut self);
+    async fn recover(&mut self) -> anyhow::Result<()>;
 
     fn last_applied_index(&self) -> u64;
 }
@@ -29,12 +29,13 @@ impl<SM: StorageEngine> StateMachine<SM> {
         self.engine.last_applied_index()
     }
 
-    pub async fn recover(&mut self) {
-        self.engine.recover().await;
+    pub async fn recover(&mut self) -> anyhow::Result<()> {
+        let _ = self.engine.recover().await;
         eprintln!(
             "State machine with last applied index {}",
             self.last_applied_index()
         );
+        Ok(())
     }
 
     pub async fn apply(&mut self, command: String) -> anyhow::Result<()> {
@@ -95,7 +96,9 @@ mod tests {
             self.data.get(key).map(|v| MemTableEntry::Value(v.clone()))
         }
 
-        async fn recover(&mut self) {}
+        async fn recover(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
 
         fn last_applied_index(&self) -> u64 {
             0

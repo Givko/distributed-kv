@@ -33,7 +33,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     pub(super) fn advance_commit_index(&mut self) {
         for log_index in self.node_state.commit_index + 1..=self.last_log_index() {
             let mut count = 1; // self
-            for (_, value) in self.node_state.match_index.iter() {
+            for value in self.node_state.match_index.values() {
                 if *value >= log_index {
                     count += 1;
                 }

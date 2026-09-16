@@ -1,8 +1,10 @@
 use crate::raft::state_machine::StorageEngine;
+use crate::storage::encoder::Encoder;
 use crate::storage::entry::{Entry, OP_DELETE, OP_SET};
+use crate::storage::fs::TokioFileSystem;
 use crate::storage::wal::{Wal, WalStorage};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum MemTableEntry {
@@ -18,14 +20,20 @@ pub struct LSMTree<W: WalStorage = Wal> {
 
 impl LSMTree<Wal> {
     pub async fn new() -> Self {
-        Self::with_wal(Wal::new(PathBuf::from("wal.log")).await)
+        let fs = Arc::new(TokioFileSystem);
+        let wal_path = "wal.log";
+        let wal = Wal::new(wal_path, fs.clone()).await;
+        Self::with_wal(wal)
     }
 
     /// Creates an LSMTree whose WAL file is named `<sanitized_id>-wal.log`,
     /// where the node ID (e.g. `127.0.0.1:5051`) has `:` and `.` replaced by `_`.
     pub async fn with_node_id(id: &str) -> Self {
         let sanitized = id.replace(['.', ':'], "_");
-        Self::with_wal(Wal::new(PathBuf::from(format!("{sanitized}-wal.log"))).await)
+        let fs = Arc::new(TokioFileSystem);
+        let wal_path = format!("{sanitized}-wal.log");
+        let wal = Wal::new(&wal_path, fs.clone()).await;
+        Self::with_wal(wal)
     }
 }
 
@@ -47,8 +55,9 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
 
     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) {
         let set_entry = Entry::set(self.next_index, key.clone(), value.clone());
+        let encoded = Encoder::encode(&set_entry);
         self.wal
-            .append(&set_entry)
+            .append(&encoded)
             .await
             .expect("Failed to write to WAL");
         self.next_index += 1;
@@ -57,8 +66,9 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
 
     async fn delete(&mut self, key: &[u8]) -> bool {
         let delete_entry = Entry::delete(self.next_index, key.to_vec());
+        let encoded = Encoder::encode(&delete_entry);
         self.wal
-            .append(&delete_entry)
+            .append(&encoded)
             .await
             .expect("Failed to write to WAL");
         self.next_index += 1;
@@ -67,21 +77,25 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
             .is_some()
     }
 
-    async fn recover(&mut self) {
+    async fn recover(&mut self) -> anyhow::Result<()> {
         match self.wal.read_all().await {
-            Ok(entries) => {
+            Ok(data) => {
+                let entries = Encoder::decode_all(&data)?;
                 for entry in entries {
-                    self.next_index = entry.index + 1;
-                    match entry.op {
-                        OP_SET => self
-                            .memtable
-                            .insert(entry.key, MemTableEntry::Value(entry.value)),
-                        OP_DELETE => self.memtable.insert(entry.key, MemTableEntry::Tombstone),
-                        _ => None,
+                    let memtable_entry = match entry.op {
+                        OP_SET => MemTableEntry::Value(entry.value),
+                        OP_DELETE => MemTableEntry::Tombstone,
+                        _ => continue,
                     };
+                    self.memtable.insert(entry.key, memtable_entry);
+                    self.next_index += 1;
                 }
+                Ok(())
             }
-            Err(e) => eprintln!("Failed to read WAL during recovery: {e}"),
+            Err(e) => {
+                eprintln!("Failed to read WAL during recovery: {e}");
+                return Err(anyhow::anyhow!(e));
+            }
         }
     }
 
@@ -115,13 +129,21 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WalStorage for RecordingWal {
-        async fn append(&mut self, entry: &WalEntry) -> io::Result<()> {
-            self.entries.lock().unwrap().push(entry.clone());
+        async fn append(&mut self, data: &[u8]) -> io::Result<()> {
+            let mut entries = Encoder::decode_all(data)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            self.entries.lock().unwrap().append(&mut entries);
             Ok(())
         }
 
-        async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
-            Ok(self.entries.lock().unwrap().clone())
+        async fn read_all(&mut self) -> io::Result<Vec<u8>> {
+            Ok(self
+                .entries
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(Encoder::encode)
+                .collect())
         }
     }
 
@@ -218,7 +240,7 @@ mod tests {
             WalEntry::set(1, b"k2".to_vec(), b"v2".to_vec()),
         ]);
         let mut tree = LSMTree::with_wal(wal);
-        tree.recover().await;
+        let _ = tree.recover().await;
         assert_eq!(
             tree.get(b"k1").await,
             Some(MemTableEntry::Value(b"v1".to_vec()))
@@ -237,7 +259,7 @@ mod tests {
             WalEntry::delete(1, b"k".to_vec()),
         ]);
         let mut tree = LSMTree::with_wal(wal);
-        tree.recover().await;
+        let _ = tree.recover().await;
         // After recovery the key carries a tombstone, not a value and not absent.
         assert_eq!(tree.get(b"k").await, Some(MemTableEntry::Tombstone));
     }
@@ -250,7 +272,7 @@ mod tests {
             WalEntry::set(1, b"k".to_vec(), b"v2".to_vec()),
         ]);
         let mut tree = LSMTree::with_wal(wal);
-        tree.recover().await;
+        let _ = tree.recover().await;
         assert_eq!(
             tree.get(b"k").await,
             Some(MemTableEntry::Value(b"v2".to_vec()))
@@ -266,7 +288,7 @@ mod tests {
             WalEntry::set(2, b"k".to_vec(), b"v2".to_vec()),
         ]);
         let mut tree = LSMTree::with_wal(wal);
-        tree.recover().await;
+        let _ = tree.recover().await;
         assert_eq!(
             tree.get(b"k").await,
             Some(MemTableEntry::Value(b"v2".to_vec()))
@@ -276,7 +298,7 @@ mod tests {
     #[tokio::test]
     async fn test_recover_empty_wal_leaves_tree_empty() {
         let mut tree = make_tree();
-        tree.recover().await;
+        let _ = tree.recover().await;
         assert_eq!(tree.get(b"k").await, None); // truly absent → None
     }
 
@@ -325,7 +347,7 @@ mod tests {
             WalEntry::delete(2, b"k1".to_vec()),
         ]);
         let mut tree = LSMTree::with_wal(wal);
-        tree.recover().await;
+        let _ = tree.recover().await;
         // 3 WAL entries (indices 0, 1, 2) → next_index = 3 → last_applied = 3.
         assert_eq!(tree.last_applied_index(), 3);
     }
@@ -333,7 +355,7 @@ mod tests {
     #[tokio::test]
     async fn test_last_applied_index_zero_after_recover_from_empty_wal() {
         let mut tree = make_tree();
-        tree.recover().await;
+        let _ = tree.recover().await;
         assert_eq!(tree.last_applied_index(), 0);
     }
 }

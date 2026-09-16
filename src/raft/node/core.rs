@@ -43,7 +43,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         node.node_state.voted_for = init_node_state.voted_for;
         node.node_state.entries = init_node_state.entries;
         node.node_state.commit_index = init_node_state.commit_index;
-        node.state_machine.recover().await;
+        let _ = node.state_machine.recover().await;
         node.node_state.last_applied = node.state_machine.last_applied_index();
 
         // Close the gap left by a crash between a Raft commit and the WAL flush:
@@ -269,7 +269,6 @@ mod tests {
     use crate::raft::node::utils::RandGen;
     use crate::raft::raft_types::{AppendEntriesData, RequestVoteData, RequestVoteReplyData};
     use crate::raft::state_persister::PersistentState;
-    use crate::storage::entry::Entry as WalEntry;
     use crate::storage::lsm_tree::LSMTree as RealLSMTree;
 
     #[tokio::test]
@@ -349,10 +348,7 @@ mod tests {
                 commit_index: 2,
             },
         };
-        let wal = PreloadedMockWal(vec![
-            WalEntry::set(0, b"key1".to_vec(), b"val1".to_vec()),
-            WalEntry::set(1, b"key2".to_vec(), b"val2".to_vec()),
-        ]);
+        let wal = PreloadedMockWal(vec![0, 1]);
         let node = Node::new(
             vec![],
             network_inbox,
@@ -389,10 +385,7 @@ mod tests {
                 commit_index: 2,
             },
         };
-        let wal = PreloadedMockWal(vec![
-            WalEntry::set(0, b"key1".to_vec(), b"val1".to_vec()),
-            WalEntry::set(1, b"key1".to_vec(), b"val2".to_vec()),
-        ]);
+        let wal = PreloadedMockWal(vec![0, 1]);
         let mut node = Node::new(
             vec![],
             network_inbox,
@@ -431,7 +424,7 @@ mod tests {
             },
         };
 
-        let wal = PreloadedMockWal(vec![WalEntry::set(0, b"key1".to_vec(), b"val1".to_vec())]);
+        let wal = PreloadedMockWal(vec![0]);
         let node = Node::new(
             vec![],
             network_inbox,

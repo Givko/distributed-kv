@@ -1,10 +1,3 @@
-//! Assembly root: builds a running node out of its parts and serves it.
-//!
-//! This is the one place that knows how the layers fit together — consensus
-//! (`raft`), persistence (`storage`), and the two transports (`raft::network_*`
-//! for peers, `api::http` for clients). Everything below is unaware of the
-//! others; nothing here implements protocol or algorithm logic itself.
-
 use crate::LsmTreeNode;
 use crate::api::http;
 use crate::raft::network_receiver::RaftService;

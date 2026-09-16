@@ -1,9 +1,3 @@
-//! Client-facing HTTP API for the key-value store.
-//!
-//! Both handlers are thin adapters over the node's mailbox: they build a
-//! `RaftMsg`, send it, and await the reply on a oneshot channel. All consensus
-//! logic lives in the node; nothing here touches Raft state directly.
-
 use crate::raft::raft_types::{ChangeStateReply, RaftMsg};
 use axum::Router;
 use axum::extract::{Path, State};
@@ -32,14 +26,10 @@ pub struct SetResponse {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
-    /// Set when the node knows who the leader is, so the caller can retry there.
     #[serde(skip_serializing_if = "String::is_empty")]
     leader: String,
 }
 
-/// Handler failures. The node itself never returns errors to a client; these
-/// cover the mailbox or the reply channel going away, plus writes that reached
-/// a follower.
 enum ApiError {
     NotLeader { leader: String },
     NodeUnavailable,

@@ -2,7 +2,6 @@
 //! `election`, and `replication` submodules.
 
 use crate::raft::state_persister::{PersistentState, Persister};
-use crate::storage::entry::Entry as WalEntry;
 use crate::storage::lsm_tree::LSMTree as RealLSMTree;
 use crate::storage::wal::WalStorage;
 use std::io;
@@ -21,25 +20,25 @@ pub(super) struct MockWal;
 
 #[async_trait::async_trait]
 impl WalStorage for MockWal {
-    async fn append(&mut self, _entry: &WalEntry) -> io::Result<()> {
+    async fn append(&mut self, _entry: &[u8]) -> io::Result<()> {
         Ok(())
     }
 
-    async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
+    async fn read_all(&mut self) -> io::Result<Vec<u8>> {
         Ok(vec![])
     }
 }
 
 /// A mock WAL that returns a fixed, pre-loaded set of entries from `read_all`.
-pub(super) struct PreloadedMockWal(pub(super) Vec<WalEntry>);
+pub(super) struct PreloadedMockWal(pub(super) Vec<u8>);
 
 #[async_trait::async_trait]
 impl WalStorage for PreloadedMockWal {
-    async fn append(&mut self, _entry: &WalEntry) -> io::Result<()> {
+    async fn append(&mut self, _entry: &[u8]) -> io::Result<()> {
         Ok(())
     }
 
-    async fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
+    async fn read_all(&mut self) -> io::Result<Vec<u8>> {
         Ok(self.0.clone())
     }
 }
