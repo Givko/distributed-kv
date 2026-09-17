@@ -2,7 +2,6 @@
 //! `election`, and `replication` submodules.
 
 use crate::common::wal::WalStorage;
-use crate::raft::raft_types::LogEntry;
 use crate::raft::state_persister::{PersistentState, Persister};
 use crate::storage::lsm_tree::LSMTree as RealLSMTree;
 use std::io;
