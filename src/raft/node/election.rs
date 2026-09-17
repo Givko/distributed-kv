@@ -126,7 +126,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
 mod tests {
     use super::*;
     use crate::raft::node::test_helpers::{LSMTree, TestPersister};
-    use crate::raft::node::utils::RandGen;
+    use crate::raft::node::utils::{RandGen, SystemClock};
     use crate::raft::raft_types::LogEntry;
 
     #[tokio::test]
@@ -139,6 +139,7 @@ mod tests {
             TestPersister,
             LSMTree::new(),
             Box::new(RandGen),
+            Box::new(SystemClock),
         )
         .await?;
         let reply = node
@@ -165,6 +166,7 @@ mod tests {
             TestPersister,
             LSMTree::new(),
             Box::new(RandGen),
+            Box::new(SystemClock),
         )
         .await?;
         node.node_state.voted_for = Some("node2".to_string());
@@ -192,6 +194,7 @@ mod tests {
             TestPersister,
             LSMTree::new(),
             Box::new(RandGen),
+            Box::new(SystemClock),
         )
         .await?;
         node.node_state.entries.push(LogEntry {
@@ -221,6 +224,7 @@ mod tests {
             TestPersister,
             LSMTree::new(),
             Box::new(RandGen),
+            Box::new(SystemClock),
         )
         .await?;
         node.node_state.entries.push(LogEntry {
@@ -250,6 +254,7 @@ mod tests {
             TestPersister,
             LSMTree::new(),
             Box::new(RandGen),
+            Box::new(SystemClock),
         )
         .await?;
         node.node_state.voted_for = Some("node2".to_string());
@@ -276,6 +281,7 @@ mod tests {
             TestPersister,
             LSMTree::new(),
             Box::new(RandGen),
+            Box::new(SystemClock),
         )
         .await?;
         node.node_state.entries.push(LogEntry {
@@ -309,6 +315,7 @@ mod tests {
             TestPersister,
             LSMTree::new(),
             Box::new(RandGen),
+            Box::new(SystemClock),
         )
         .await?;
         node.node_state.entries.push(LogEntry {
@@ -338,6 +345,7 @@ mod tests {
             TestPersister,
             LSMTree::new(),
             Box::new(RandGen),
+            Box::new(SystemClock),
         )
         .await?;
         node.node_state.current_term = 2;
@@ -364,6 +372,7 @@ mod tests {
             TestPersister,
             LSMTree::new(),
             Box::new(RandGen),
+            Box::new(SystemClock),
         )
         .await?;
         node.node_state.entries.push(LogEntry {
@@ -398,6 +407,7 @@ mod tests {
             TestPersister,
             LSMTree::new(),
             Box::new(RandGen),
+            Box::new(SystemClock),
         )
         .await?;
         node.node_state.current_term = 1;
@@ -422,6 +432,7 @@ mod tests {
             TestPersister,
             LSMTree::new(),
             Box::new(RandGen),
+            Box::new(SystemClock),
         )
         .await?;
         node.node_state.current_term = 1;

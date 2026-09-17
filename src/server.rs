@@ -3,7 +3,7 @@ use crate::api::http;
 use crate::raft::network_receiver::RaftService;
 use crate::raft::network_sender::network_worker;
 use crate::raft::network_types::OutMsg;
-use crate::raft::node::utils::RandGen;
+use crate::raft::node::utils::{RandGen, SystemClock};
 use crate::raft::proto::raft_server::RaftServer;
 use crate::raft::raft_types::RaftMsg;
 use crate::raft::state_persister::FilePersistentStorage;
@@ -36,6 +36,7 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
         persister,
         storage_engine,
         Box::new(RandGen),
+        Box::new(SystemClock),
     )
     .await?;
     _ = tokio::spawn(async move { node.run(mailbox_rcv).await });

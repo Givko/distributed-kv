@@ -12,3 +12,15 @@ impl RandomGenerator for RandGen {
         rng.random_range(min..=max)
     }
 }
+
+pub trait Clock {
+    fn now(&self) -> tokio::time::Instant;
+}
+
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> tokio::time::Instant {
+        tokio::time::Instant::now()
+    }
+}

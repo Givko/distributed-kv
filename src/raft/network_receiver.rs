@@ -1,9 +1,3 @@
-//! Inbound side of the peer-to-peer Raft transport.
-//!
-//! Serves the gRPC `Raft` service: every handler translates a peer's RPC into a
-//! `RaftMsg`, hands it to the node's mailbox, and waits for the reply. The
-//! outbound half — dialing peers — lives in [`super::network_sender`].
-
 use super::proto::raft_server::Raft;
 use super::proto::{
     AppendEntriesMessage, AppendEntriesReply, RequestVoteMessage, RequestVoteReply,
