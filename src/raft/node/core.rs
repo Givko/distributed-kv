@@ -43,7 +43,10 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         let init_node_state = node.state_persister.load_state().await?;
         node.node_state.current_term = init_node_state.current_term;
         node.node_state.voted_for = init_node_state.voted_for;
+
+        //TODO: Recover entries from Entries WAL
         node.node_state.entries = init_node_state.entries;
+
         node.node_state.commit_index = init_node_state.commit_index;
         let _ = node.state_machine.recover().await;
         node.node_state.last_applied = node.state_machine.last_applied_index();

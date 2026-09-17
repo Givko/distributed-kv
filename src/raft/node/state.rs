@@ -38,6 +38,7 @@ pub(super) struct NodeState {
 
 impl NodeState {
     pub(super) async fn append_entry(&mut self, entry: LogEntry) {
+        //TODO: persist entry to disk before appending to in-memory log
         self.entries.push(entry);
     }
 
