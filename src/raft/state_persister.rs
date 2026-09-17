@@ -15,6 +15,7 @@ pub struct PersistentState {
 pub trait Persister {
     async fn save_state(&self, state: &PersistentState) -> anyhow::Result<()>;
     async fn load_state(&self) -> anyhow::Result<PersistentState>;
+    async fn append_entry(&self, entry: &LogEntry) -> anyhow::Result<()>;
     async fn create_snapshot(
         &self,
         last_included_index: u64,
@@ -38,6 +39,12 @@ impl FilePersistentStorage {
 
 #[async_trait::async_trait]
 impl Persister for FilePersistentStorage {
+    async fn append_entry(&self, entry: &LogEntry) -> anyhow::Result<()> {
+        panic!(
+            "Append entry is not implemented in FilePersistentStorage. Use save_state to persist the entire state."
+        );
+    }
+
     async fn save_state(&self, state: &PersistentState) -> anyhow::Result<()> {
         let serialized_state = serde_json::to_string(state)?;
         let file_path = self.get_state_file_path();
