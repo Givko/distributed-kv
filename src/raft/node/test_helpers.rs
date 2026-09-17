@@ -46,6 +46,7 @@ impl WalStorage for PreloadedMockWal {
 pub(super) struct LSMTree;
 
 impl LSMTree {
+    #[allow(clippy::new_ret_no_self)]
     pub(super) fn new() -> RealLSMTree<MockWal> {
         RealLSMTree::with_wal(MockWal)
     }
