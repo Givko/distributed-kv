@@ -39,7 +39,7 @@ impl FilePersistentStorage {
 
 #[async_trait::async_trait]
 impl Persister for FilePersistentStorage {
-    async fn append_entry(&self, _entry: &LogEntry) -> anyhow::Result<()> {
+    async fn append_entry(&self, entry: &LogEntry) -> anyhow::Result<()> {
         panic!(
             "Append entry is not implemented in FilePersistentStorage. Use save_state to persist the entire state."
         );
