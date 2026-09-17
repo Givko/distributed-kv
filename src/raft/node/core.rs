@@ -172,10 +172,12 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                         .last()
                         .map_or(self.node_state.snapshot_last_term, |e| e.term);
 
-                    self.node_state.entries.push(LogEntry {
-                        term: self.node_state.current_term,
-                        command: command.clone(),
-                    });
+                    self.node_state
+                        .append_entry(LogEntry {
+                            term: self.node_state.current_term,
+                            command: command.clone(),
+                        })
+                        .await;
                     self.advance_commit_index();
                     self.persist_state()
                         .await

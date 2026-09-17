@@ -37,6 +37,10 @@ pub(super) struct NodeState {
 }
 
 impl NodeState {
+    pub(super) async fn append_entry(&mut self, entry: LogEntry) {
+        self.entries.push(entry);
+    }
+
     pub(super) fn new(id: String, peers: Vec<String>) -> Self {
         let next_index = peers.iter().map(|p| (p.clone(), 0)).collect();
         let match_index = peers.iter().map(|p| (p.clone(), 0)).collect();

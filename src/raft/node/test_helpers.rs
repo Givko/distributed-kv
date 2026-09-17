@@ -55,9 +55,6 @@ impl LSMTree {
 
 #[async_trait::async_trait]
 impl Persister for TestPersister {
-    async fn append_entry(&self, _entry: &LogEntry) -> anyhow::Result<()> {
-        Ok(())
-    }
     async fn save_state(&self, _state: &PersistentState) -> anyhow::Result<()> {
         Ok(())
     }
@@ -76,9 +73,6 @@ impl Persister for TestPersister {
 
 #[async_trait::async_trait]
 impl Persister for LoadedStatePersister {
-    async fn append_entry(&self, _entry: &LogEntry) -> anyhow::Result<()> {
-        Ok(())
-    }
     async fn save_state(&self, _state: &PersistentState) -> anyhow::Result<()> {
         Ok(())
     }
@@ -97,9 +91,6 @@ impl Persister for LoadedStatePersister {
 
 #[async_trait::async_trait]
 impl Persister for FailingLoadPersister {
-    async fn append_entry(&self, _entry: &LogEntry) -> anyhow::Result<()> {
-        Ok(())
-    }
     async fn save_state(&self, _state: &PersistentState) -> anyhow::Result<()> {
         Ok(())
     }
@@ -113,10 +104,6 @@ impl Persister for FailingLoadPersister {
 
 #[async_trait::async_trait]
 impl Persister for RecordingPersister {
-    async fn append_entry(&self, _entry: &LogEntry) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     async fn save_state(&self, state: &PersistentState) -> anyhow::Result<()> {
         let mut saved = self.saved_state.lock().expect("lock");
         *saved = Some(PersistentState {
