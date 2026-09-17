@@ -3,7 +3,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 #[async_trait::async_trait]
-pub(super) trait FileHandle: Send + Sync {
+pub trait FileHandle: Send + Sync {
     async fn write_all(&mut self, data: &[u8]) -> io::Result<()>;
     async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize>;
     async fn flush(&mut self) -> io::Result<()>;
@@ -12,11 +12,11 @@ pub(super) trait FileHandle: Send + Sync {
 }
 
 #[async_trait::async_trait]
-pub(super) trait FileSystem: Send + Sync {
+pub trait FileSystem: Send + Sync {
     async fn create_or_append(&self, path: &str) -> io::Result<Box<dyn FileHandle>>;
 }
 
-struct TokioFileHandle {
+pub struct TokioFileHandle {
     file: tokio::fs::File,
 }
 
@@ -44,7 +44,7 @@ impl FileHandle for TokioFileHandle {
     }
 }
 
-pub(super) struct TokioFileSystem;
+pub struct TokioFileSystem;
 
 #[async_trait::async_trait]
 impl FileSystem for TokioFileSystem {

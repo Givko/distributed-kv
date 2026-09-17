@@ -1,10 +1,10 @@
 //! Shared test doubles for the `Node` unit tests across the `core`,
 //! `election`, and `replication` submodules.
 
+use crate::common::wal::WalStorage;
 use crate::raft::raft_types::LogEntry;
 use crate::raft::state_persister::{PersistentState, Persister};
 use crate::storage::lsm_tree::LSMTree as RealLSMTree;
-use crate::storage::wal::WalStorage;
 use std::io;
 use std::sync::{Arc, Mutex};
 

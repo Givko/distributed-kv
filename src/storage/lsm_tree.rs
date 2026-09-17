@@ -1,8 +1,8 @@
+use crate::common::fs::TokioFileSystem;
+use crate::common::wal::{Wal, WalStorage};
 use crate::raft::state_machine::StorageEngine;
 use crate::storage::encoder::Encoder;
 use crate::storage::entry::{Entry, OP_DELETE, OP_SET};
-use crate::storage::fs::TokioFileSystem;
-use crate::storage::wal::{Wal, WalStorage};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -110,8 +110,8 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::wal::WalStorage;
     use crate::storage::entry::{Entry as WalEntry, OP_DELETE, OP_SET};
-    use crate::storage::wal::WalStorage;
     use std::io;
     use std::sync::Mutex;
 

@@ -1,4 +1,5 @@
 pub mod api;
+pub mod common;
 pub mod raft;
 pub mod server;
 pub mod storage;

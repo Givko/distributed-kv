@@ -1,7 +1,7 @@
 use std::io;
 use std::sync::Arc;
 
-use crate::storage::fs::{FileHandle, FileSystem};
+use crate::common::fs::{FileHandle, FileSystem};
 
 #[async_trait::async_trait]
 pub trait WalStorage: Send + Sync {
@@ -14,7 +14,7 @@ pub struct Wal {
 }
 
 impl Wal {
-    pub(super) async fn new(path: &str, fs: Arc<dyn FileSystem>) -> Self {
+    pub async fn new(path: &str, fs: Arc<dyn FileSystem>) -> Self {
         let file = fs
             .create_or_append(path)
             .await
@@ -44,7 +44,7 @@ impl WalStorage for Wal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::fs::{FileHandle, FileSystem};
+    use crate::common::fs::{FileHandle, FileSystem};
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
 
