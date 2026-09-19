@@ -1,6 +1,9 @@
 use crate::common::entry::Entry;
 use std::io::{self, Error, ErrorKind};
 
+/// Size of the `u32` length prefix that precedes every record.
+const LEN_PREFIX_SIZE: usize = 4;
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Encoder;
 
@@ -67,10 +70,16 @@ impl Encoder {
     }
 
     pub fn encode(entry: &Entry) -> Vec<u8> {
-        let mut encoded =
-            Vec::with_capacity(4 + 8 + 1 + 4 + entry.key.len() + 4 + entry.value.len());
+        let mut encoded = Vec::with_capacity(Self::encoded_len(entry));
         Self::encode_into(entry, &mut encoded);
         encoded
+    }
+
+    /// Total bytes `encode` produces for `entry`, length prefix included.
+    /// Single source of truth for the record size -- `encode_into` derives
+    /// both its prefix and its return value from this.
+    pub fn encoded_len(entry: &Entry) -> usize {
+        LEN_PREFIX_SIZE + 8 + 1 + 4 + entry.key.len() + 4 + entry.value.len()
     }
 
     // Returns the number of bytes written
@@ -83,7 +92,9 @@ impl Encoder {
         let key = &entry.key;
         let value_len_bytes = value_len.to_be_bytes();
         let value = &entry.value;
-        let len: u32 = 8 + 1 + 4 + key_len + 4 + value_len;
+        let encoded_len = Self::encoded_len(entry);
+        // The prefix counts the record body, so it excludes the prefix itself.
+        let len = (encoded_len - LEN_PREFIX_SIZE) as u32;
 
         bytes.extend_from_slice(&len.to_be_bytes());
         bytes.extend_from_slice(&index);
@@ -93,7 +104,7 @@ impl Encoder {
         bytes.extend_from_slice(&value_len_bytes);
         bytes.extend_from_slice(value);
 
-        4 + len as usize
+        encoded_len
     }
 
     pub fn decode_all(data: &[u8]) -> io::Result<Vec<Entry>> {
@@ -101,15 +112,17 @@ impl Encoder {
         let mut cursor = 0;
         while cursor < data.len() {
             // Read the record length prefix
-            if cursor + 4 > data.len() {
+            if cursor + LEN_PREFIX_SIZE > data.len() {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
                     "Corrupted WAL entry: missing length prefix",
                 ));
             }
 
-            let len = u32::from_be_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
+            let len = u32::from_be_bytes(
+                data[cursor..cursor + LEN_PREFIX_SIZE].try_into().unwrap(),
+            ) as usize;
+            cursor += LEN_PREFIX_SIZE;
             if cursor + len > data.len() {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
@@ -139,6 +152,20 @@ impl Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_encoded_len_matches_encode() {
+        let entries = [
+            Entry::set(1, b"a".to_vec(), b"x".to_vec()),
+            Entry::delete(2, b"bb".to_vec()),
+            Entry::set(3, Vec::new(), Vec::new()),
+            Entry::set(4, b"longer_key".to_vec(), b"longer_value".to_vec()),
+        ];
+
+        for entry in entries {
+            assert_eq!(Encoder::encode(&entry).len(), Encoder::encoded_len(&entry));
+        }
+    }
     use crate::common::entry::{Entry, OP_DELETE, OP_SET};
 
     #[tokio::test]

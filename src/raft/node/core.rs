@@ -1,6 +1,6 @@
 use crate::common::encoder::Encoder;
-use crate::common::entry::{Entry, OP_DELETE, OP_SET};
-use crate::common::wal::{Wal, WalStorage};
+use crate::common::entry::Entry;
+use crate::common::wal::WalStorage;
 use crate::raft::network_types::OutMsg;
 use crate::raft::node::state::{NodeState, State};
 use crate::raft::node::utils::{Clock, RandomGenerator};
@@ -26,6 +26,7 @@ pub struct Node<T, SM: StorageEngine> {
 }
 
 impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         peers: Vec<String>,
         network_inbox: Sender<OutMsg>,
@@ -271,7 +272,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             .map_err(|_| anyhow::anyhow!("reply receiver dropped"))
     }
 
-    async fn append_entry(&mut self, entry: LogEntry) {
+    pub(super) async fn append_entry(&mut self, entry: LogEntry) {
         let wal_entry: Entry = entry
             .to_entry()
             .expect("Failed to convert LogEntry to Entry");

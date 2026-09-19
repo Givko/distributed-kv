@@ -9,6 +9,7 @@ pub trait FileHandle: Send + Sync {
     async fn flush(&mut self) -> io::Result<()>;
     async fn sync_all(&mut self) -> io::Result<()>;
     async fn rewind(&mut self) -> io::Result<()>;
+    async fn truncate(&mut self, len: usize) -> io::Result<()>;
 }
 
 #[async_trait::async_trait]
@@ -40,6 +41,11 @@ impl FileHandle for TokioFileHandle {
 
     async fn rewind(&mut self) -> io::Result<()> {
         self.file.rewind().await?;
+        Ok(())
+    }
+
+    async fn truncate(&mut self, len: usize) -> io::Result<()> {
+        self.file.set_len(len as u64).await?;
         Ok(())
     }
 }

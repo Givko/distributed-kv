@@ -27,6 +27,9 @@ impl WalStorage for MockWal {
     async fn read_all(&mut self) -> io::Result<Vec<u8>> {
         Ok(vec![])
     }
+    async fn truncate(&mut self, _len: usize) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A mock WAL that returns a fixed, pre-loaded set of entries from `read_all`.
@@ -40,6 +43,10 @@ impl WalStorage for PreloadedMockWal {
 
     async fn read_all(&mut self) -> io::Result<Vec<u8>> {
         Ok(self.0.clone())
+    }
+
+    async fn truncate(&mut self, _len: usize) -> io::Result<()> {
+        Ok(())
     }
 }
 

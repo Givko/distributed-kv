@@ -145,6 +145,9 @@ mod tests {
                 .flat_map(Encoder::encode)
                 .collect())
         }
+        async fn truncate(&mut self, _len: usize) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     fn make_tree() -> LSMTree<RecordingWal> {

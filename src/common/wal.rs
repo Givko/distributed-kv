@@ -7,6 +7,7 @@ use crate::common::fs::{FileHandle, FileSystem};
 pub trait WalStorage: Send + Sync {
     async fn append(&mut self, data: &[u8]) -> io::Result<()>;
     async fn read_all(&mut self) -> io::Result<Vec<u8>>;
+    async fn truncate(&mut self, len: usize) -> io::Result<()>;
 }
 
 pub struct Wal {
@@ -38,6 +39,11 @@ impl WalStorage for Wal {
         self.file_handle.read_to_end(&mut buffer).await?;
         self.file_handle.rewind().await?;
         Ok(buffer)
+    }
+
+    async fn truncate(&mut self, len: usize) -> io::Result<()> {
+        self.file_handle.truncate(len).await?;
+        Ok(())
     }
 }
 
@@ -76,6 +82,15 @@ mod tests {
 
         async fn rewind(&mut self) -> io::Result<()> {
             std::io::Seek::rewind(&mut self.cursor)
+        }
+
+        async fn truncate(&mut self, len: usize) -> io::Result<()> {
+            let mut data = self.cursor.get_ref().clone();
+            data.truncate(len);
+            let position = std::io::Seek::stream_position(&mut self.cursor)?.min(len as u64);
+            self.cursor = io::Cursor::new(data);
+            std::io::Seek::seek(&mut self.cursor, io::SeekFrom::Start(position))?;
+            Ok(())
         }
     }
 
