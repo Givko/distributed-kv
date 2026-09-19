@@ -189,7 +189,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raft::node::test_helpers::{LSMTree, RecordingPersister, TestPersister};
+    use crate::raft::node::test_helpers::{LSMTree, MockWal, RecordingPersister, TestPersister};
     use crate::raft::node::utils::{RandGen, SystemClock};
     use crate::raft::raft_types::RaftMsg;
     use std::sync::{Arc, Mutex};
@@ -214,6 +214,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.state = State::Leader;
@@ -243,6 +244,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 4;
@@ -280,6 +282,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 4;
@@ -315,6 +318,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 1;
@@ -346,6 +350,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 1;
@@ -377,6 +382,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 2;
@@ -408,6 +414,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 2;
@@ -439,6 +446,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 2;
@@ -474,6 +482,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 2;
@@ -514,6 +523,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 2;
@@ -559,6 +569,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 2;
@@ -598,6 +609,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 2;
@@ -638,6 +650,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 2;
@@ -682,6 +695,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 2;
@@ -714,6 +728,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 1;
@@ -741,6 +756,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 2;
@@ -771,6 +787,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 2;
@@ -814,6 +831,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 2;

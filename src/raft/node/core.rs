@@ -1,3 +1,6 @@
+use crate::common::encoder::Encoder;
+use crate::common::entry::{Entry, OP_DELETE, OP_SET};
+use crate::common::wal::{Wal, WalStorage};
 use crate::raft::network_types::OutMsg;
 use crate::raft::node::state::{NodeState, State};
 use crate::raft::node::utils::{Clock, RandomGenerator};
@@ -5,10 +8,10 @@ use crate::raft::raft_types::{ChangeStateReply, LogEntry, RaftMsg};
 use crate::raft::state_machine::StateMachine;
 use crate::raft::state_machine::StorageEngine;
 use crate::raft::state_persister::{PersistentState, Persister};
+
 use std::{collections::HashMap, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
-
 pub struct Node<T, SM: StorageEngine> {
     pub(super) node_state: NodeState,
 
@@ -17,6 +20,7 @@ pub struct Node<T, SM: StorageEngine> {
     pub(super) random_generator: Box<dyn RandomGenerator + Send + Sync>,
     pub(super) pending_clients: HashMap<u64, oneshot::Sender<ChangeStateReply>>,
     pub(super) clock: Box<dyn Clock + Send + Sync>,
+    pub(super) entries_wal: Box<dyn WalStorage + Send + Sync>,
 
     pub(super) state_persister: T,
 }
@@ -30,6 +34,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         storage_engine: SM,
         random_generator: Box<dyn RandomGenerator + Send + Sync>,
         clock: Box<dyn Clock + Send + Sync>,
+        log_entries_wal_storage: Box<dyn WalStorage + Send + Sync>,
     ) -> anyhow::Result<Self> {
         let mut node = Node {
             node_state: NodeState::new(id, peers),
@@ -39,6 +44,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             state_persister,
             random_generator,
             clock,
+            entries_wal: log_entries_wal_storage,
         };
         let init_node_state = node.state_persister.load_state().await?;
         node.node_state.current_term = init_node_state.current_term;
@@ -175,12 +181,11 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                         .last()
                         .map_or(self.node_state.snapshot_last_term, |e| e.term);
 
-                    self.node_state
-                        .append_entry(LogEntry {
-                            term: self.node_state.current_term,
-                            command: command.clone(),
-                        })
-                        .await;
+                    self.append_entry(LogEntry {
+                        term: self.node_state.current_term,
+                        command: command.clone(),
+                    })
+                    .await;
                     self.advance_commit_index();
                     self.persist_state()
                         .await
@@ -265,13 +270,29 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             .send(reply)
             .map_err(|_| anyhow::anyhow!("reply receiver dropped"))
     }
+
+    async fn append_entry(&mut self, entry: LogEntry) {
+        let wal_entry: Entry = entry
+            .to_entry()
+            .expect("Failed to convert LogEntry to Entry");
+        let encoded_entry = Encoder::encode(&wal_entry);
+        self.entries_wal
+            .append(&encoded_entry)
+            .await
+            .expect("Failed to append entry to WAL");
+        self.node_state.entries.push(entry);
+        self.persist_state()
+            .await
+            .expect("Failed to persist state after appending entry");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::raft::node::test_helpers::{
-        FailingLoadPersister, LSMTree, LoadedStatePersister, PreloadedMockWal, TestPersister,
+        FailingLoadPersister, LSMTree, LoadedStatePersister, MockWal, PreloadedMockWal,
+        TestPersister,
     };
     use crate::raft::node::utils::{RandGen, SystemClock};
     use crate::raft::raft_types::{AppendEntriesData, RequestVoteData, RequestVoteReplyData};
@@ -307,6 +328,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
 
@@ -332,6 +354,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await;
         assert!(result.is_err());
@@ -366,6 +389,7 @@ mod tests {
             RealLSMTree::with_wal(wal),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
 
@@ -404,6 +428,7 @@ mod tests {
             RealLSMTree::with_wal(wal),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
 
@@ -444,6 +469,7 @@ mod tests {
             RealLSMTree::with_wal(wal),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
 
@@ -482,6 +508,7 @@ mod tests {
             RealLSMTree::with_wal(PreloadedMockWal(vec![])),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         assert_eq!(node.node_state.last_applied, 0);
@@ -518,6 +545,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 1;
@@ -566,6 +594,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 1;
@@ -617,6 +646,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
 
@@ -652,6 +682,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
 
@@ -683,6 +714,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
 
@@ -710,6 +742,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
 

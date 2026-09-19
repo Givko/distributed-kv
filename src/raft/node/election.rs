@@ -125,7 +125,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raft::node::test_helpers::{LSMTree, TestPersister};
+    use crate::raft::node::test_helpers::{LSMTree, MockWal, TestPersister};
     use crate::raft::node::utils::{RandGen, SystemClock};
     use crate::raft::raft_types::LogEntry;
 
@@ -140,6 +140,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         let reply = node
@@ -167,6 +168,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.voted_for = Some("node2".to_string());
@@ -195,6 +197,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.entries.push(LogEntry {
@@ -225,6 +228,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.entries.push(LogEntry {
@@ -255,6 +259,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.voted_for = Some("node2".to_string());
@@ -282,6 +287,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.entries.push(LogEntry {
@@ -316,6 +322,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.entries.push(LogEntry {
@@ -346,6 +353,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 2;
@@ -373,6 +381,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.entries.push(LogEntry {
@@ -408,6 +417,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 1;
@@ -433,6 +443,7 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
+            Box::new(MockWal),
         )
         .await?;
         node.node_state.current_term = 1;

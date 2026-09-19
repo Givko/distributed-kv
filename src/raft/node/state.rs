@@ -11,10 +11,6 @@ pub enum State {
     Follower,
 }
 
-/// Plain data held by a [`Node`](super::Node): the Raft state the algorithm
-/// reads and mutates. It carries no behaviour and owns no collaborators —
-/// channels, the state machine, the persister and the random generator stay on
-/// the `Node` itself.
 #[derive(Debug, Default)]
 pub(super) struct NodeState {
     pub(super) id: String,
@@ -37,11 +33,6 @@ pub(super) struct NodeState {
 }
 
 impl NodeState {
-    pub(super) async fn append_entry(&mut self, entry: LogEntry) {
-        //TODO: persist entry to disk before appending to in-memory log
-        self.entries.push(entry);
-    }
-
     pub(super) fn new(id: String, peers: Vec<String>) -> Self {
         let next_index = peers.iter().map(|p| (p.clone(), 0)).collect();
         let match_index = peers.iter().map(|p| (p.clone(), 0)).collect();
