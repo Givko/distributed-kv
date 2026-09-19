@@ -1,4 +1,4 @@
-use crate::storage::entry::Entry;
+use crate::common::entry::Entry;
 use std::io::{self, Error, ErrorKind};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -139,7 +139,7 @@ impl Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::entry::{Entry, OP_DELETE, OP_SET};
+    use crate::common::entry::{Entry, OP_DELETE, OP_SET};
 
     #[tokio::test]
     async fn test_decode_set_entry() {
