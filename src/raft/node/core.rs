@@ -91,7 +91,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             }
             Err(e) => {
                 eprintln!("Failed to read WAL during recovery: {e}");
-                return Err(anyhow::anyhow!(e));
+                Err(anyhow::anyhow!(e))
             }
         }
     }

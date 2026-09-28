@@ -15,6 +15,8 @@ pub(super) struct LoadedStatePersister {
     pub(super) state: PersistentState,
 }
 pub(super) struct FailingLoadPersister;
+
+#[allow(dead_code)]
 pub(super) struct RecordingPersister {
     pub(super) saved_state: Arc<Mutex<Option<PersistentState>>>,
 }

@@ -201,10 +201,8 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raft::node::test_helpers::{LSMTree, MockWal, RecordingPersister, TestPersister};
+    use crate::raft::node::test_helpers::{LSMTree, MockWal, TestPersister};
     use crate::raft::node::utils::{RandGen, SystemClock};
-    use crate::raft::raft_types::RaftMsg;
-    use std::sync::{Arc, Mutex};
 
     // ============================================================
     // Replication: AppendEntries handling, AppendEntries replies,
