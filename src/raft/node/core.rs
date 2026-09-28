@@ -1,5 +1,5 @@
 use crate::common::encoder::Encoder;
-use crate::common::entry::Entry;
+use crate::common::entry::{Entry, OP_DELETE, OP_SET};
 use crate::common::wal::WalStorage;
 use crate::raft::network_types::OutMsg;
 use crate::raft::node::state::{NodeState, State};
@@ -51,8 +51,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         node.node_state.current_term = init_node_state.current_term;
         node.node_state.voted_for = init_node_state.voted_for;
 
-        //TODO: Recover entries from Entries WAL
-        node.node_state.entries = init_node_state.entries;
+        node.recover_log().await?;
 
         node.node_state.commit_index = init_node_state.commit_index;
         let _ = node.state_machine.recover().await;
@@ -67,6 +66,35 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         Ok(node)
     }
 
+    async fn recover_log(&mut self) -> anyhow::Result<()> {
+        match self.entries_wal.read_all().await {
+            Ok(data) => {
+                let entries = Encoder::decode_all(&data)?;
+                for entry in entries {
+                    match entry.op {
+                        OP_SET => self.node_state.entries.push(LogEntry {
+                            term: entry.index,
+                            command: format!(
+                                "set {} {}",
+                                String::from_utf8_lossy(&entry.key),
+                                String::from_utf8_lossy(&entry.value)
+                            ),
+                        }),
+                        OP_DELETE => self.node_state.entries.push(LogEntry {
+                            term: entry.index,
+                            command: format!("delete {}", String::from_utf8_lossy(&entry.key)),
+                        }),
+                        _ => continue,
+                    };
+                }
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("Failed to read WAL during recovery: {e}");
+                return Err(anyhow::anyhow!(e));
+            }
+        }
+    }
     fn reset_election_timer(&self) -> tokio::time::Instant {
         let duration = if self.node_state.state == State::Leader {
             tokio::time::Duration::from_millis(50)
@@ -107,7 +135,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         let persistent_state = PersistentState {
             current_term: self.node_state.current_term,
             voted_for: self.node_state.voted_for.clone(),
-            entries: self.node_state.entries.clone(),
             commit_index: self.node_state.commit_index,
         };
         self.state_persister.save_state(&persistent_state).await?;
@@ -293,7 +320,7 @@ mod tests {
     use super::*;
     use crate::raft::node::test_helpers::{
         FailingLoadPersister, LSMTree, LoadedStatePersister, MockWal, PreloadedMockWal,
-        TestPersister,
+        RecordingMockWal, TestPersister, encoded_applied, encoded_log,
     };
     use crate::raft::node::utils::{RandGen, SystemClock};
     use crate::raft::raft_types::{AppendEntriesData, RequestVoteData, RequestVoteReplyData};
@@ -308,16 +335,6 @@ mod tests {
             state: PersistentState {
                 current_term: 7,
                 voted_for: Some("node3".to_string()),
-                entries: vec![
-                    LogEntry {
-                        term: 5,
-                        command: "set key1 val1".to_string(),
-                    },
-                    LogEntry {
-                        term: 7,
-                        command: "set key2 val2".to_string(),
-                    },
-                ],
                 commit_index: 2,
             },
         };
@@ -329,7 +346,10 @@ mod tests {
             LSMTree::new(),
             Box::new(RandGen),
             Box::new(SystemClock),
-            Box::new(MockWal),
+            Box::new(PreloadedMockWal(encoded_log(&[
+                (5, "set key1 val1"),
+                (7, "set key2 val2"),
+            ]))),
         )
         .await?;
 
@@ -368,20 +388,13 @@ mod tests {
             state: PersistentState {
                 current_term: 1,
                 voted_for: None,
-                entries: vec![
-                    LogEntry {
-                        term: 1,
-                        command: "set key1 val1".to_string(),
-                    },
-                    LogEntry {
-                        term: 1,
-                        command: "set key2 val2".to_string(),
-                    },
-                ],
                 commit_index: 2,
             },
         };
-        let wal = PreloadedMockWal(vec![0, 1]);
+        // Both writes are already durable in the state machine's WAL, so recovery
+        // alone must lift `last_applied` to 2 and leave nothing for `apply_commands`.
+        let (wal, sm_appends) =
+            RecordingMockWal::new(encoded_applied(&[("key1", "val1"), ("key2", "val2")]));
         let node = Node::new(
             vec![],
             network_inbox,
@@ -390,11 +403,18 @@ mod tests {
             RealLSMTree::with_wal(wal),
             Box::new(RandGen),
             Box::new(SystemClock),
-            Box::new(MockWal),
+            Box::new(PreloadedMockWal(encoded_log(&[
+                (1, "set key1 val1"),
+                (1, "set key2 val2"),
+            ]))),
         )
         .await?;
 
         assert_eq!(node.node_state.last_applied, 2);
+        // Nothing was written back: both commands came from recovery, not from a
+        // replay of the log. This is what distinguishes the two paths -- either way
+        // the keys end up set and `last_applied` reaches 2.
+        assert!(sm_appends.lock().unwrap().is_empty());
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
         assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
         Ok(())
@@ -407,20 +427,13 @@ mod tests {
             state: PersistentState {
                 current_term: 1,
                 voted_for: None,
-                entries: vec![
-                    LogEntry {
-                        term: 1,
-                        command: "set key1 val1".to_string(),
-                    },
-                    LogEntry {
-                        term: 1,
-                        command: "set key1 val2".to_string(),
-                    },
-                ],
                 commit_index: 2,
             },
         };
-        let wal = PreloadedMockWal(vec![0, 1]);
+        // Both log entries overwrite `key1` and both are already applied, so a
+        // second `apply_commands` must not walk the log again.
+        let (wal, sm_appends) =
+            RecordingMockWal::new(encoded_applied(&[("key1", "val1"), ("key1", "val2")]));
         let mut node = Node::new(
             vec![],
             network_inbox,
@@ -429,13 +442,17 @@ mod tests {
             RealLSMTree::with_wal(wal),
             Box::new(RandGen),
             Box::new(SystemClock),
-            Box::new(MockWal),
+            Box::new(PreloadedMockWal(encoded_log(&[
+                (1, "set key1 val1"),
+                (1, "set key1 val2"),
+            ]))),
         )
         .await?;
 
         assert_eq!(node.node_state.last_applied, 2);
         node.apply_commands().await?;
         assert_eq!(node.node_state.last_applied, 2);
+        assert!(sm_appends.lock().unwrap().is_empty());
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val2");
         Ok(())
     }
@@ -447,21 +464,14 @@ mod tests {
             state: PersistentState {
                 current_term: 1,
                 voted_for: None,
-                entries: vec![
-                    LogEntry {
-                        term: 1,
-                        command: "set key1 val1".to_string(),
-                    },
-                    LogEntry {
-                        term: 1,
-                        command: "set key2 val2".to_string(),
-                    },
-                ],
                 commit_index: 2,
             },
         };
 
-        let wal = PreloadedMockWal(vec![0]);
+        // The state machine crashed after applying entry 1 but before entry 2,
+        // which is committed: `key1` comes back from recovery, `key2` has to be
+        // replayed from the log at init.
+        let (wal, sm_appends) = RecordingMockWal::new(encoded_applied(&[("key1", "val1")]));
         let node = Node::new(
             vec![],
             network_inbox,
@@ -470,12 +480,17 @@ mod tests {
             RealLSMTree::with_wal(wal),
             Box::new(RandGen),
             Box::new(SystemClock),
-            Box::new(MockWal),
+            Box::new(PreloadedMockWal(encoded_log(&[
+                (1, "set key1 val1"),
+                (1, "set key2 val2"),
+            ]))),
         )
         .await?;
 
         assert_eq!(node.node_state.last_applied, 2);
         assert_eq!(node.node_state.commit_index, 2);
+        // Exactly one write closed the gap -- entry 1 was already durable.
+        assert_eq!(sm_appends.lock().unwrap().len(), 1);
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
         assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
         Ok(())
@@ -488,16 +503,6 @@ mod tests {
             state: PersistentState {
                 current_term: 1,
                 voted_for: None,
-                entries: vec![
-                    LogEntry {
-                        term: 1,
-                        command: "set key1 val1".to_string(),
-                    },
-                    LogEntry {
-                        term: 1,
-                        command: "set key2 val2".to_string(),
-                    },
-                ],
                 commit_index: 0,
             },
         };
@@ -509,7 +514,10 @@ mod tests {
             RealLSMTree::with_wal(PreloadedMockWal(vec![])),
             Box::new(RandGen),
             Box::new(SystemClock),
-            Box::new(MockWal),
+            Box::new(PreloadedMockWal(encoded_log(&[
+                (1, "set key1 val1"),
+                (1, "set key2 val2"),
+            ]))),
         )
         .await?;
         assert_eq!(node.node_state.last_applied, 0);

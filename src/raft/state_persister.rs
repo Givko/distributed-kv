@@ -7,7 +7,6 @@ use tokio::io::AsyncWriteExt;
 pub struct PersistentState {
     pub current_term: u64,
     pub voted_for: Option<String>,
-    pub entries: Vec<LogEntry>,
     pub commit_index: u64,
 }
 
@@ -70,7 +69,6 @@ impl Persister for FilePersistentStorage {
                 return Ok(PersistentState {
                     current_term: 0,
                     voted_for: None,
-                    entries: vec![],
                     commit_index: 0,
                 });
             }
