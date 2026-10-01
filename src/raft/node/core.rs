@@ -95,6 +95,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             }
         }
     }
+
     fn reset_election_timer(&self) -> tokio::time::Instant {
         let duration = if self.node_state.state == State::Leader {
             tokio::time::Duration::from_millis(50)
@@ -320,7 +321,7 @@ mod tests {
     use super::*;
     use crate::raft::node::test_helpers::{
         FailingLoadPersister, LSMTree, LoadedStatePersister, MockWal, PreloadedMockWal,
-        RecordingMockWal, TestPersister, encoded_applied, encoded_log,
+        InMemoryWal, TestPersister, encoded_applied, encoded_log, record_count,
     };
     use crate::raft::node::utils::{RandGen, SystemClock};
     use crate::raft::raft_types::{AppendEntriesData, RequestVoteData, RequestVoteReplyData};
@@ -393,8 +394,8 @@ mod tests {
         };
         // Both writes are already durable in the state machine's WAL, so recovery
         // alone must lift `last_applied` to 2 and leave nothing for `apply_commands`.
-        let (wal, sm_appends) =
-            RecordingMockWal::new(encoded_applied(&[("key1", "val1"), ("key2", "val2")]));
+        let (wal, sm_wal) =
+            InMemoryWal::preloaded(encoded_applied(&[("key1", "val1"), ("key2", "val2")]));
         let node = Node::new(
             vec![],
             network_inbox,
@@ -411,10 +412,10 @@ mod tests {
         .await?;
 
         assert_eq!(node.node_state.last_applied, 2);
-        // Nothing was written back: both commands came from recovery, not from a
-        // replay of the log. This is what distinguishes the two paths -- either way
-        // the keys end up set and `last_applied` reaches 2.
-        assert!(sm_appends.lock().unwrap().is_empty());
+        // Still two records: both commands came from recovery, not from a replay of
+        // the log. This is what distinguishes the two paths -- either way the keys
+        // end up set and `last_applied` reaches 2.
+        assert_eq!(record_count(&sm_wal), 2);
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
         assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
         Ok(())
@@ -432,8 +433,8 @@ mod tests {
         };
         // Both log entries overwrite `key1` and both are already applied, so a
         // second `apply_commands` must not walk the log again.
-        let (wal, sm_appends) =
-            RecordingMockWal::new(encoded_applied(&[("key1", "val1"), ("key1", "val2")]));
+        let (wal, sm_wal) =
+            InMemoryWal::preloaded(encoded_applied(&[("key1", "val1"), ("key1", "val2")]));
         let mut node = Node::new(
             vec![],
             network_inbox,
@@ -452,7 +453,7 @@ mod tests {
         assert_eq!(node.node_state.last_applied, 2);
         node.apply_commands().await?;
         assert_eq!(node.node_state.last_applied, 2);
-        assert!(sm_appends.lock().unwrap().is_empty());
+        assert_eq!(record_count(&sm_wal), 2);
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val2");
         Ok(())
     }
@@ -471,7 +472,7 @@ mod tests {
         // The state machine crashed after applying entry 1 but before entry 2,
         // which is committed: `key1` comes back from recovery, `key2` has to be
         // replayed from the log at init.
-        let (wal, sm_appends) = RecordingMockWal::new(encoded_applied(&[("key1", "val1")]));
+        let (wal, sm_wal) = InMemoryWal::preloaded(encoded_applied(&[("key1", "val1")]));
         let node = Node::new(
             vec![],
             network_inbox,
@@ -489,8 +490,8 @@ mod tests {
 
         assert_eq!(node.node_state.last_applied, 2);
         assert_eq!(node.node_state.commit_index, 2);
-        // Exactly one write closed the gap -- entry 1 was already durable.
-        assert_eq!(sm_appends.lock().unwrap().len(), 1);
+        // One write closed the gap -- entry 1 was already durable, entry 2 was not.
+        assert_eq!(record_count(&sm_wal), 2);
         assert_eq!(node.state_machine.get("key1").await.unwrap(), "val1");
         assert_eq!(node.state_machine.get("key2").await.unwrap(), "val2");
         Ok(())

@@ -200,48 +200,63 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
-    use crate::raft::node::test_helpers::{LSMTree, MockWal, TestPersister};
+    use crate::common::entry::Entry;
+    use crate::raft::node::test_helpers::{
+        InMemoryWal, LSMTree, MockWal, RecordingPersister, TestPersister,
+    };
     use crate::raft::node::utils::{RandGen, SystemClock};
+    use crate::raft::raft_types::RaftMsg;
 
     // ============================================================
     // Replication: AppendEntries handling, AppendEntries replies,
     //              and leader command replication / commit advance
     // ============================================================
 
-    //TODO: Fix test to use WAL
-    //#[tokio::test]
-    //async fn test_leader_change_state_persists_new_entry() -> anyhow::Result<()> {
-    //    let (network_inbox, _) = tokio::sync::mpsc::channel(100);
-    //    let saved_state = Arc::new(Mutex::new(None));
-    //    let persister = RecordingPersister {
-    //        saved_state: saved_state.clone(),
-    //    };
-    //    let mut node = Node::new(
-    //        vec![],
-    //        network_inbox,
-    //        "node1".to_string(),
-    //        persister,
-    //        LSMTree::new(),
-    //        Box::new(RandGen),
-    //        Box::new(SystemClock),
-    //        Box::new(MockWal),
-    //    )
-    //    .await?;
-    //    node.node_state.state = State::Leader;
-    //    node.node_state.current_term = 3;
-    //    node.handle_message(RaftMsg::ChangeState {
-    //        command: "set key1 value1".to_string(),
-    //        reply_channel: None,
-    //    })
-    //    .await?;
-    //    let persisted = saved_state.lock().unwrap();
-    //    let persisted = persisted.as_ref().expect("should persist");
-    //    assert_eq!(persisted.entries.len(), 1);
-    //    assert_eq!(persisted.entries[0].term, 3);
-    //    assert_eq!(persisted.entries[0].command, "set key1 value1");
-    //    Ok(())
-    //}
+    #[tokio::test]
+    async fn test_leader_change_state_persists_new_entry() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let saved_state = Arc::new(Mutex::new(None));
+        let persister = RecordingPersister {
+            saved_state: saved_state.clone(),
+        };
+        let (entries_wal, wal_data) = InMemoryWal::new();
+        let mut node = Node::new(
+            vec![],
+            network_inbox,
+            "node1".to_string(),
+            persister,
+            LSMTree::new(),
+            Box::new(RandGen),
+            Box::new(SystemClock),
+            Box::new(entries_wal),
+        )
+        .await?;
+        node.node_state.state = State::Leader;
+        node.node_state.current_term = 3;
+        node.handle_message(RaftMsg::ChangeState {
+            command: "set key1 value1".to_string(),
+            reply_channel: None,
+        })
+        .await?;
+
+        // The entry itself is durable in the WAL now, not in the persisted state.
+        let entries = Encoder::decode_all(&wal_data.lock().unwrap())?;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0],
+            Entry::set(3, b"key1".to_vec(), b"value1".to_vec())
+        );
+
+        // The persister still carries the term and the advanced commit index.
+        let persisted = saved_state.lock().unwrap();
+        let persisted = persisted.as_ref().expect("should persist");
+        assert_eq!(persisted.current_term, 3);
+        assert_eq!(persisted.commit_index, 1);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_handle_append_entries_uses_snapshot_index_and_term_for_prev_log_match()

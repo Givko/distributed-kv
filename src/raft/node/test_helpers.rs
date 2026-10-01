@@ -89,43 +89,49 @@ pub(super) fn encoded_applied(writes: &[(&str, &str)]) -> Vec<u8> {
         .collect()
 }
 
-/// A mock WAL that serves `preloaded` from `read_all` and records every `append`
-/// in a handle the test keeps. Lets a test assert that recovery wrote nothing
-/// back, which is the only externally visible difference between "recovered from
-/// the WAL" and "replayed from the log".
-pub(super) struct RecordingMockWal {
-    preloaded: Vec<u8>,
-    appends: Arc<Mutex<Vec<Vec<u8>>>>,
+/// A mock WAL backed by a shared byte buffer: `append` extends it, `read_all`
+/// returns all of it and `truncate` shortens it, the way a real append-only file
+/// behaves. The handle returned alongside it lets a test decode exactly what the
+/// node wrote, or assert that it wrote nothing.
+pub(super) struct InMemoryWal {
+    data: Arc<Mutex<Vec<u8>>>,
 }
 
-impl RecordingMockWal {
-    /// Returns the WAL and a handle onto the appends it will record.
-    pub(super) fn new(preloaded: Vec<u8>) -> (Self, Arc<Mutex<Vec<Vec<u8>>>>) {
-        let appends = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                preloaded,
-                appends: appends.clone(),
-            },
-            appends,
-        )
+impl InMemoryWal {
+    /// An empty WAL, plus a handle onto its bytes.
+    pub(super) fn new() -> (Self, Arc<Mutex<Vec<u8>>>) {
+        Self::preloaded(Vec::new())
+    }
+
+    /// A WAL already holding `data`, plus a handle onto its bytes.
+    pub(super) fn preloaded(data: Vec<u8>) -> (Self, Arc<Mutex<Vec<u8>>>) {
+        let data = Arc::new(Mutex::new(data));
+        (Self { data: data.clone() }, data)
     }
 }
 
 #[async_trait::async_trait]
-impl WalStorage for RecordingMockWal {
+impl WalStorage for InMemoryWal {
     async fn append(&mut self, entry: &[u8]) -> io::Result<()> {
-        self.appends.lock().unwrap().push(entry.to_vec());
+        self.data.lock().unwrap().extend_from_slice(entry);
         Ok(())
     }
 
     async fn read_all(&mut self) -> io::Result<Vec<u8>> {
-        Ok(self.preloaded.clone())
+        Ok(self.data.lock().unwrap().clone())
     }
 
-    async fn truncate(&mut self, _len: usize) -> io::Result<()> {
+    async fn truncate(&mut self, len: usize) -> io::Result<()> {
+        self.data.lock().unwrap().truncate(len);
         Ok(())
     }
+}
+
+/// Number of records a WAL buffer holds, for asserting on what a node wrote.
+pub(super) fn record_count(data: &Arc<Mutex<Vec<u8>>>) -> usize {
+    Encoder::decode_all(&data.lock().unwrap())
+        .expect("WAL buffer must decode")
+        .len()
 }
 
 pub(super) struct LSMTree;
