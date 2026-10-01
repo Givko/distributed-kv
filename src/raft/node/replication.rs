@@ -89,17 +89,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             let truncate_to =
                 (append_request.prev_log_index - self.node_state.snapshot_last_index) as usize;
 
-            let bytes_to_keep: usize = self.node_state.entries[..truncate_to]
-                .iter()
-                .map(|e| {
-                    Encoder::encoded_len(
-                        &e.to_entry().expect("Failed to convert LogEntry to Entry"),
-                    )
-                })
-                .sum();
-
-            self.entries_wal.truncate(bytes_to_keep).await?;
-            self.node_state.entries.truncate(truncate_to);
+            self.truncate_log(truncate_to).await?;
         }
 
         let entries_count = append_request.entries.len();

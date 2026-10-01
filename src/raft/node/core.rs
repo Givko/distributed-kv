@@ -1,5 +1,3 @@
-use crate::common::encoder::Encoder;
-use crate::common::entry::{Entry, OP_DELETE, OP_SET};
 use crate::common::wal::WalStorage;
 use crate::raft::network_types::OutMsg;
 use crate::raft::node::state::{NodeState, State};
@@ -64,36 +62,6 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         // "commit_index > last_applied implies apply" invariant true from startup.
         node.apply_commands().await?;
         Ok(node)
-    }
-
-    async fn recover_log(&mut self) -> anyhow::Result<()> {
-        match self.entries_wal.read_all().await {
-            Ok(data) => {
-                let entries = Encoder::decode_all(&data)?;
-                for entry in entries {
-                    match entry.op {
-                        OP_SET => self.node_state.entries.push(LogEntry {
-                            term: entry.index,
-                            command: format!(
-                                "set {} {}",
-                                String::from_utf8_lossy(&entry.key),
-                                String::from_utf8_lossy(&entry.value)
-                            ),
-                        }),
-                        OP_DELETE => self.node_state.entries.push(LogEntry {
-                            term: entry.index,
-                            command: format!("delete {}", String::from_utf8_lossy(&entry.key)),
-                        }),
-                        _ => continue,
-                    };
-                }
-                Ok(())
-            }
-            Err(e) => {
-                eprintln!("Failed to read WAL during recovery: {e}");
-                Err(anyhow::anyhow!(e))
-            }
-        }
     }
 
     fn reset_election_timer(&self) -> tokio::time::Instant {
@@ -193,53 +161,55 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                 self.send_to_reply_channel(reply_channel, ())?;
             }
             RaftMsg::ChangeState {
+                command: _,
+                reply_channel,
+            } if !matches!(self.node_state.state, State::Leader) => {
+                let reply = ChangeStateReply {
+                    success: false,
+                    leader: self.node_state.leader.clone(),
+                };
+                self.send_to_reply_channel(reply_channel, reply)?;
+            }
+            RaftMsg::ChangeState {
                 command,
                 reply_channel,
             } => {
-                if !matches!(self.node_state.state, State::Leader) {
-                    let reply = ChangeStateReply {
-                        success: false,
-                        leader: self.node_state.leader.clone(),
-                    };
-                    self.send_to_reply_channel(reply_channel, reply)?;
-                } else {
-                    let prev_log_index = self.last_log_index();
-                    let prev_log_term = self
-                        .node_state
-                        .entries
-                        .last()
-                        .map_or(self.node_state.snapshot_last_term, |e| e.term);
+                let prev_log_index = self.last_log_index();
+                let prev_log_term = self
+                    .node_state
+                    .entries
+                    .last()
+                    .map_or(self.node_state.snapshot_last_term, |e| e.term);
 
-                    self.append_entry(LogEntry {
+                self.append_entry(LogEntry {
+                    term: self.node_state.current_term,
+                    command: command.clone(),
+                })
+                .await;
+                self.advance_commit_index();
+                self.persist_state()
+                    .await
+                    .expect("Failed to persist state after adding new command");
+                for peer in &self.node_state.peers {
+                    let append_entries = OutMsg::AppendEntries {
                         term: self.node_state.current_term,
-                        command: command.clone(),
-                    })
-                    .await;
-                    self.advance_commit_index();
-                    self.persist_state()
-                        .await
-                        .expect("Failed to persist state after adding new command");
-                    for peer in &self.node_state.peers {
-                        let append_entries = OutMsg::AppendEntries {
+                        peer: peer.clone(),
+                        prev_log_index,
+                        prev_log_term,
+                        leader_commit: self.node_state.commit_index,
+                        leader_id: self.node_state.id.clone(),
+                        entries: vec![LogEntry {
                             term: self.node_state.current_term,
-                            peer: peer.clone(),
-                            prev_log_index,
-                            prev_log_term,
-                            leader_commit: self.node_state.commit_index,
-                            leader_id: self.node_state.id.clone(),
-                            entries: vec![LogEntry {
-                                term: self.node_state.current_term,
-                                command: command.clone(),
-                            }],
-                        };
-                        eprintln!("replicating to {}", peer.clone());
-                        self.network_inbox.send(append_entries).await?;
-                    }
+                            command: command.clone(),
+                        }],
+                    };
+                    eprintln!("replicating to {}", peer.clone());
+                    self.network_inbox.send(append_entries).await?;
+                }
 
-                    let log_index = self.last_log_index();
-                    if let Some(reply_channel) = reply_channel {
-                        self.pending_clients.insert(log_index, reply_channel);
-                    }
+                let log_index = self.last_log_index();
+                if let Some(reply_channel) = reply_channel {
+                    self.pending_clients.insert(log_index, reply_channel);
                 }
             }
             RaftMsg::GetState { key, reply_channel } => {
@@ -299,29 +269,14 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             .send(reply)
             .map_err(|_| anyhow::anyhow!("reply receiver dropped"))
     }
-
-    pub(super) async fn append_entry(&mut self, entry: LogEntry) {
-        let wal_entry: Entry = entry
-            .to_entry()
-            .expect("Failed to convert LogEntry to Entry");
-        let encoded_entry = Encoder::encode(&wal_entry);
-        self.entries_wal
-            .append(&encoded_entry)
-            .await
-            .expect("Failed to append entry to WAL");
-        self.node_state.entries.push(entry);
-        self.persist_state()
-            .await
-            .expect("Failed to persist state after appending entry");
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::raft::node::test_helpers::{
-        FailingLoadPersister, LSMTree, LoadedStatePersister, MockWal, PreloadedMockWal,
-        InMemoryWal, TestPersister, encoded_applied, encoded_log, record_count,
+        FailingLoadPersister, InMemoryWal, LSMTree, LoadedStatePersister, MockWal,
+        PreloadedMockWal, TestPersister, encoded_applied, encoded_log, record_count,
     };
     use crate::raft::node::utils::{RandGen, SystemClock};
     use crate::raft::raft_types::{AppendEntriesData, RequestVoteData, RequestVoteReplyData};
