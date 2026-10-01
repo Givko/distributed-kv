@@ -1,5 +1,4 @@
 use super::{Node, State};
-use crate::common::encoder::Encoder;
 use crate::raft::network_types::OutMsg;
 use crate::raft::raft_types::{AppendEntriesData, AppendEntriesReplyData, LogEntry};
 use crate::raft::state_machine::StorageEngine;
@@ -193,6 +192,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::common::encoder::Encoder;
     use crate::common::entry::Entry;
     use crate::raft::node::test_helpers::{
         InMemoryWal, LSMTree, MockWal, RecordingPersister, TestPersister,
