@@ -149,4 +149,53 @@ mod tests {
             Entry::set(1, b"key1".to_vec(), b"val1".to_vec())
         );
     }
+
+    #[test]
+    fn test_to_entry_preserves_spaces_in_key_and_value() {
+        let log_entry = LogEntry {
+            term: 2,
+            command: Command::Set {
+                key: "user name".to_string(),
+                value: "John Doe".to_string(),
+            },
+        };
+
+        let entry = log_entry.to_entry();
+
+        assert_eq!(entry.key, b"user name".to_vec());
+        assert_eq!(entry.value, b"John Doe".to_vec());
+    }
+
+    #[test]
+    fn test_to_entry_preserves_empty_value() {
+        let log_entry = LogEntry {
+            term: 2,
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: String::new(),
+            },
+        };
+
+        let entry = log_entry.to_entry();
+
+        assert_eq!(entry.op, OP_SET);
+        assert_eq!(entry.key, b"key1".to_vec());
+        assert!(entry.value.is_empty());
+    }
+
+    #[test]
+    fn test_to_entry_delete_leaves_value_empty() {
+        let log_entry = LogEntry {
+            term: 9,
+            command: Command::Delete {
+                key: "user name".to_string(),
+            },
+        };
+
+        let entry = log_entry.to_entry();
+
+        assert_eq!(entry.op, OP_DELETE);
+        assert_eq!(entry.key, b"user name".to_vec());
+        assert!(entry.value.is_empty());
+    }
 }

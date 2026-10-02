@@ -221,4 +221,68 @@ mod tests {
             .is_ok()
         );
     }
+
+    // ------------------------------------------------------------
+    // Typed commands carry keys and values the old whitespace-delimited
+    // string could not represent.
+    // ------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_apply_set_preserves_value_with_spaces() {
+        let mut sm = make_sm();
+        sm.apply(Command::Set {
+            key: "key1".into(),
+            value: "John Doe".into(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(sm.get("key1").await.as_deref(), Some("John Doe"));
+    }
+
+    #[tokio::test]
+    async fn test_apply_set_preserves_key_with_spaces() {
+        let mut sm = make_sm();
+        sm.apply(Command::Set {
+            key: "user name".into(),
+            value: "val1".into(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(sm.get("user name").await.as_deref(), Some("val1"));
+    }
+
+    #[tokio::test]
+    async fn test_apply_delete_removes_key_with_spaces() {
+        let mut sm = make_sm();
+        sm.apply(Command::Set {
+            key: "user name".into(),
+            value: "val1".into(),
+        })
+        .await
+        .unwrap();
+        sm.apply(Command::Delete {
+            key: "user name".into(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(sm.get("user name").await, None);
+    }
+
+    #[tokio::test]
+    async fn test_apply_set_preserves_value_with_leading_and_trailing_spaces() {
+        let mut sm = make_sm();
+        sm.apply(Command::Set {
+            key: "key1".into(),
+            value: "  padded  ".into(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(sm.get("key1").await.as_deref(), Some("  padded  "));
+    }
+
+    #[tokio::test]
+    async fn test_get_missing_key_returns_none() {
+        let sm = make_sm();
+        assert_eq!(sm.get("missing").await, None);
+    }
 }

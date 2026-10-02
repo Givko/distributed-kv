@@ -107,3 +107,208 @@ impl Raft for RaftService {
         Ok(Response::new(reply))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raft::proto::{
+        Command as ProtoCommand, Delete, Entry as ProtoEntry, Set, command::Kind as ProtoKind,
+    };
+    use crate::raft::raft_types::Command;
+
+    fn append_entries_message(entries: Vec<ProtoEntry>) -> AppendEntriesMessage {
+        AppendEntriesMessage {
+            term: 2,
+            prev_log_index: 0,
+            prev_log_term: 0,
+            leader_commit: 0,
+            leader_id: "node2".to_string(),
+            entries,
+        }
+    }
+
+    fn set_entry(term: u64, key: &str, value: &str) -> ProtoEntry {
+        ProtoEntry {
+            term,
+            command: Some(ProtoCommand {
+                kind: Some(ProtoKind::Set(Set {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                })),
+            }),
+        }
+    }
+
+    // ------------------------------------------------------------
+    // A malformed entry is a client error, not a reason to crash the
+    // whole gRPC server task.
+    // ------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_append_entries_rejects_entry_without_command() {
+        let (mailbox, mut inbox) = tokio::sync::mpsc::channel(1);
+        let service = RaftService::new(mailbox);
+
+        let status = service
+            .append_entries(Request::new(append_entries_message(vec![ProtoEntry {
+                term: 1,
+                command: None,
+            }])))
+            .await
+            .expect_err("entry without a command must be rejected");
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(
+            inbox.try_recv().is_err(),
+            "a malformed request must not reach the Raft node"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_append_entries_rejects_command_without_kind() {
+        let (mailbox, mut inbox) = tokio::sync::mpsc::channel(1);
+        let service = RaftService::new(mailbox);
+
+        let status = service
+            .append_entries(Request::new(append_entries_message(vec![ProtoEntry {
+                term: 1,
+                command: Some(ProtoCommand { kind: None }),
+            }])))
+            .await
+            .expect_err("command without a kind must be rejected");
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(
+            inbox.try_recv().is_err(),
+            "a malformed request must not reach the Raft node"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_append_entries_rejects_malformed_entry_among_valid_ones() {
+        let (mailbox, mut inbox) = tokio::sync::mpsc::channel(1);
+        let service = RaftService::new(mailbox);
+
+        let status = service
+            .append_entries(Request::new(append_entries_message(vec![
+                set_entry(1, "key1", "val1"),
+                ProtoEntry {
+                    term: 2,
+                    command: None,
+                },
+            ])))
+            .await
+            .expect_err("one malformed entry must reject the whole batch");
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(
+            inbox.try_recv().is_err(),
+            "no entry from a partially malformed batch may be applied"
+        );
+    }
+
+    // ------------------------------------------------------------
+    // Well-formed entries decode into typed commands
+    // ------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_append_entries_forwards_typed_commands() -> anyhow::Result<()> {
+        let (mailbox, mut inbox) = tokio::sync::mpsc::channel(1);
+        let service = RaftService::new(mailbox);
+
+        let node = tokio::spawn(async move {
+            let message = inbox.recv().await.expect("mailbox message");
+            let RaftMsg::AppendEntries {
+                append_request,
+                reply_channel,
+            } = message
+            else {
+                panic!("expected an AppendEntries message");
+            };
+            reply_channel
+                .expect("reply channel")
+                .send(AppendEntriesReplyData {
+                    term: 2,
+                    success: true,
+                    peer: "node1".to_string(),
+                    entries_count: append_request.entries.len() as u64,
+                })
+                .expect("reply must be delivered");
+            append_request
+        });
+
+        let reply = service
+            .append_entries(Request::new(append_entries_message(vec![
+                set_entry(1, "user name", "John Doe"),
+                ProtoEntry {
+                    term: 2,
+                    command: Some(ProtoCommand {
+                        kind: Some(ProtoKind::Delete(Delete {
+                            key: "key1".to_string(),
+                        })),
+                    }),
+                },
+            ])))
+            .await
+            .expect("well-formed request must be accepted")
+            .into_inner();
+
+        assert!(reply.success);
+        assert_eq!(reply.term, 2);
+
+        let append_request = node.await?;
+        assert_eq!(append_request.term, 2);
+        assert_eq!(append_request.leader_id, "node2");
+        assert_eq!(append_request.entries.len(), 2);
+        assert_eq!(append_request.entries[0].term, 1);
+        // The value keeps its space -- the old string encoding split on
+        // whitespace and would have lost everything after "John".
+        assert_eq!(
+            append_request.entries[0].command,
+            Command::Set {
+                key: "user name".to_string(),
+                value: "John Doe".to_string(),
+            }
+        );
+        assert_eq!(append_request.entries[1].term, 2);
+        assert_eq!(
+            append_request.entries[1].command,
+            Command::Delete {
+                key: "key1".to_string(),
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_append_entries_accepts_empty_heartbeat() -> anyhow::Result<()> {
+        let (mailbox, mut inbox) = tokio::sync::mpsc::channel(1);
+        let service = RaftService::new(mailbox);
+
+        let node = tokio::spawn(async move {
+            let message = inbox.recv().await.expect("mailbox message");
+            let RaftMsg::AppendEntries { reply_channel, .. } = message else {
+                panic!("expected an AppendEntries message");
+            };
+            reply_channel
+                .expect("reply channel")
+                .send(AppendEntriesReplyData {
+                    term: 2,
+                    success: true,
+                    peer: "node1".to_string(),
+                    entries_count: 0,
+                })
+                .expect("reply must be delivered");
+        });
+
+        let reply = service
+            .append_entries(Request::new(append_entries_message(vec![])))
+            .await
+            .expect("heartbeat must be accepted")
+            .into_inner();
+
+        assert!(reply.success);
+        node.await?;
+        Ok(())
+    }
+}

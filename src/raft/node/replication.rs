@@ -196,10 +196,11 @@ mod tests {
     use crate::common::encoder::Encoder;
     use crate::common::entry::Entry;
     use crate::raft::node::test_helpers::{
-        InMemoryWal, LSMTree, MockWal, RecordingPersister, TestPersister,
+        InMemoryWal, LSMTree, LoadedStatePersister, MockWal, RecordingPersister, TestPersister,
     };
     use crate::raft::node::utils::{RandGen, SystemClock};
-    use crate::raft::raft_types::{Command, RaftMsg};
+    use crate::raft::raft_types::{Command, RaftMsg, RequestVoteData};
+    use crate::raft::state_persister::PersistentState;
 
     // ============================================================
     // Replication: AppendEntries handling, AppendEntries replies,
@@ -968,6 +969,106 @@ mod tests {
         })
         .await?;
         assert_eq!(*node.node_state.next_index.get("test").unwrap(), 1);
+        Ok(())
+    }
+
+    // ------------------------------------------------------------
+    // Term advance on a *rejected* AppendEntries must clear the vote
+    // ------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_rejected_append_entries_at_higher_term_clears_vote() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let persister = LoadedStatePersister {
+            state: PersistentState {
+                current_term: 1,
+                voted_for: Some("node2".to_string()),
+                commit_index: 0,
+            },
+        };
+        let mut node = Node::new(
+            vec!["node2".to_string(), "node3".to_string()],
+            network_inbox,
+            "node1".to_string(),
+            persister,
+            LSMTree::new(),
+            Box::new(RandGen),
+            Box::new(SystemClock),
+            Box::new(MockWal),
+        )
+        .await?;
+        node.node_state.state = State::Candidate { votes: 1 };
+
+        // prev_log_index 5 is past the end of an empty log, so this is rejected
+        // -- but it still carries a newer term, so the node must step down and
+        // forget the vote it cast in the old term.
+        let reply = node
+            .handle_append_entries(AppendEntriesData {
+                term: 2,
+                prev_log_index: 5,
+                prev_log_term: 1,
+                leader_commit: 0,
+                leader_id: "node3".to_string(),
+                entries: vec![],
+            })
+            .await?;
+
+        assert!(!reply.success);
+        assert_eq!(reply.term, 2);
+        assert_eq!(node.node_state.current_term, 2);
+        assert_eq!(node.node_state.voted_for, None);
+        assert_eq!(node.node_state.state, State::Follower);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_vote_granted_in_term_entered_by_rejected_append_entries() -> anyhow::Result<()> {
+        let (network_inbox, _) = tokio::sync::mpsc::channel(100);
+        let persister = LoadedStatePersister {
+            state: PersistentState {
+                current_term: 1,
+                voted_for: Some("node2".to_string()),
+                commit_index: 0,
+            },
+        };
+        let mut node = Node::new(
+            vec!["node2".to_string(), "node3".to_string()],
+            network_inbox,
+            "node1".to_string(),
+            persister,
+            LSMTree::new(),
+            Box::new(RandGen),
+            Box::new(SystemClock),
+            Box::new(MockWal),
+        )
+        .await?;
+
+        node.handle_append_entries(AppendEntriesData {
+            term: 2,
+            prev_log_index: 5,
+            prev_log_term: 1,
+            leader_commit: 0,
+            leader_id: "node3".to_string(),
+            entries: vec![],
+        })
+        .await?;
+
+        // A candidate for term 2 now asks for the vote. The node never voted in
+        // term 2 -- only in term 1 -- so it must grant it. Leaving `voted_for`
+        // set across the term change would deny every candidate in term 2 and
+        // stall the election until another timeout.
+        let reply = node
+            .handle_vote_request(RequestVoteData {
+                term: 2,
+                candidate: "node3".to_string(),
+                last_log_index: 0,
+                last_log_term: 0,
+            })
+            .await?;
+
+        assert!(reply.vote);
+        assert_eq!(reply.term, 2);
+        assert_eq!(node.node_state.voted_for, Some("node3".to_string()));
         Ok(())
     }
 }
