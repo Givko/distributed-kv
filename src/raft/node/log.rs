@@ -1,7 +1,7 @@
 use super::Node;
 use crate::common::encoder::Encoder;
 use crate::common::entry::{Entry, OP_DELETE, OP_SET};
-use crate::raft::raft_types::LogEntry;
+use crate::raft::raft_types::{Command, LogEntry};
 use crate::raft::state_machine::StorageEngine;
 use crate::raft::state_persister::Persister;
 
@@ -60,17 +60,21 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                     match entry.op {
                         OP_SET => self.node_state.entries.push(LogEntry {
                             term: entry.index,
-                            command: format!(
-                                "set {} {}",
-                                String::from_utf8_lossy(&entry.key),
-                                String::from_utf8_lossy(&entry.value)
-                            ),
+                            command: Command::Set {
+                                key: String::from_utf8_lossy(&entry.key).to_string(),
+                                value: String::from_utf8_lossy(&entry.value).to_string(),
+                            },
                         }),
                         OP_DELETE => self.node_state.entries.push(LogEntry {
                             term: entry.index,
-                            command: format!("delete {}", String::from_utf8_lossy(&entry.key)),
+                            command: Command::Delete {
+                                key: String::from_utf8_lossy(&entry.key).to_string(),
+                            },
                         }),
-                        _ => continue,
+                        _ => Err(anyhow::anyhow!(
+                            "Unknown operation in WAL entry: {}",
+                            entry.op
+                        ))?,
                     };
                 }
                 Ok(())

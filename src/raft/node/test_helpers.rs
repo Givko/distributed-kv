@@ -4,7 +4,7 @@
 use crate::common::encoder::Encoder;
 use crate::common::entry::Entry;
 use crate::common::wal::WalStorage;
-use crate::raft::raft_types::LogEntry;
+use crate::raft::raft_types::{Command, LogEntry};
 use crate::raft::state_persister::{PersistentState, Persister};
 use crate::storage::lsm_tree::LSMTree as RealLSMTree;
 use std::io;
@@ -58,13 +58,13 @@ impl WalStorage for PreloadedMockWal {
 /// Encodes `commands` the way the node's entries WAL holds them: one record per
 /// `LogEntry`, with the term in the record index. Feed the result to
 /// `PreloadedMockWal` to give a recovering node a non-empty Raft log.
-pub(super) fn encoded_log(commands: &[(u64, &str)]) -> Vec<u8> {
+pub(super) fn encoded_log(commands: &[(u64, &Command)]) -> Vec<u8> {
     commands
         .iter()
         .flat_map(|(term, command)| {
             let entry = LogEntry {
                 term: *term,
-                command: (*command).to_string(),
+                command: (*command).clone(),
             };
             Encoder::encode(&entry.to_entry().expect("test command must parse"))
         })

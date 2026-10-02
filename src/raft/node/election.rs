@@ -127,7 +127,7 @@ mod tests {
     use super::*;
     use crate::raft::node::test_helpers::{LSMTree, MockWal, TestPersister};
     use crate::raft::node::utils::{RandGen, SystemClock};
-    use crate::raft::raft_types::LogEntry;
+    use crate::raft::raft_types::{Command, LogEntry};
 
     #[tokio::test]
     async fn test_handle_vote_request() -> anyhow::Result<()> {
@@ -202,7 +202,10 @@ mod tests {
         .await?;
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "cmd1".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            },
         });
         let reply = node
             .handle_vote_request(RequestVoteData {
@@ -233,7 +236,10 @@ mod tests {
         .await?;
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "cmd1".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            },
         });
         let reply = node
             .handle_vote_request(RequestVoteData {
@@ -292,11 +298,17 @@ mod tests {
         .await?;
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "cmd1".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "cmd2".to_string(),
+            command: Command::Set {
+                key: "key2".to_string(),
+                value: "val2".to_string(),
+            },
         });
         let reply = node
             .handle_vote_request(RequestVoteData {
@@ -327,7 +339,10 @@ mod tests {
         .await?;
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "cmd1".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            },
         });
         let reply = node
             .handle_vote_request(RequestVoteData {
@@ -386,11 +401,17 @@ mod tests {
         .await?;
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "cmd1".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "cmd2".to_string(),
+            command: Command::Set {
+                key: "key2".to_string(),
+                value: "val2".to_string(),
+            },
         });
         let reply = node
             .handle_vote_request(RequestVoteData {

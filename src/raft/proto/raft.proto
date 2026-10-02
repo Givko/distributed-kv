@@ -11,10 +11,26 @@ service Raft {
   rpc AppendEntries (AppendEntriesMessage) returns (AppendEntriesReply);
 }
 
+message Set {
+  string key   = 1;
+  string value = 2;
+}
+
+message Delete {
+  string key = 1;
+}
+
+message Command {
+  oneof kind {
+    Set set = 1;
+    Delete delete = 2;
+  }
+}
+
 // Entry represents a single log entry in the Raft log
 message Entry {
   uint64 term    = 1;
-  string command = 3;
+  Command command = 3;
 }
 
 // RequestVoteMessage is sent by candidates to request votes from other nodes

@@ -90,7 +90,10 @@ async fn set_key(
     Path(key): Path<String>,
     axum::Json(body): axum::Json<SetRequest>,
 ) -> Result<axum::Json<SetResponse>, ApiError> {
-    let command = format!("SET {} {}", key, body.value);
+    let command = crate::raft::raft_types::Command::Set {
+        key,
+        value: body.value,
+    };
     let (snd, rcv) = tokio::sync::oneshot::channel::<ChangeStateReply>();
     mailbox
         .send(RaftMsg::ChangeState {

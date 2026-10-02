@@ -40,7 +40,22 @@ pub async fn network_worker(mut outbox: Receiver<OutMsg>, raft_inbox: Sender<Raf
                     .into_iter()
                     .map(|entry| Entry {
                         term: entry.term,
-                        command: entry.command,
+                        command: match entry.command {
+                            super::raft_types::Command::Set { key, value } => {
+                                Some(super::proto::Command {
+                                    kind: Some(super::proto::command::Kind::Set(
+                                        super::proto::Set { key, value },
+                                    )),
+                                })
+                            }
+                            super::raft_types::Command::Delete { key } => {
+                                Some(super::proto::Command {
+                                    kind: Some(super::proto::command::Kind::Delete(
+                                        super::proto::Delete { key },
+                                    )),
+                                })
+                            }
+                        },
                     })
                     .collect();
                 let message = AppendEntriesMessage {

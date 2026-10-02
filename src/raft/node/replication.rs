@@ -60,6 +60,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
             if self.node_state.current_term < append_request.term {
                 self.node_state.state = State::Follower;
                 self.node_state.current_term = append_request.term;
+                self.node_state.voted_for = None;
             }
 
             self.persist_state().await?;
@@ -198,7 +199,7 @@ mod tests {
         InMemoryWal, LSMTree, MockWal, RecordingPersister, TestPersister,
     };
     use crate::raft::node::utils::{RandGen, SystemClock};
-    use crate::raft::raft_types::RaftMsg;
+    use crate::raft::raft_types::{Command, RaftMsg};
 
     // ============================================================
     // Replication: AppendEntries handling, AppendEntries replies,
@@ -227,7 +228,10 @@ mod tests {
         node.node_state.state = State::Leader;
         node.node_state.current_term = 3;
         node.handle_message(RaftMsg::ChangeState {
-            command: "set key1 value1".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "value1".to_string(),
+            },
             reply_channel: None,
         })
         .await?;
@@ -275,7 +279,10 @@ mod tests {
                 leader_id: "node2".to_string(),
                 entries: vec![LogEntry {
                     term: 4,
-                    command: "set key val".to_string(),
+                    command: Command::Set {
+                        key: "key1".to_string(),
+                        value: "val1".to_string(),
+                    },
                 }],
             })
             .await?;
@@ -313,7 +320,10 @@ mod tests {
                 leader_id: "node2".to_string(),
                 entries: vec![LogEntry {
                     term: 4,
-                    command: "set key val".to_string(),
+                    command: Command::Set {
+                        key: "key1".to_string(),
+                        value: "val1".to_string(),
+                    },
                 }],
             })
             .await?;
@@ -469,7 +479,10 @@ mod tests {
         node.node_state.state = State::Leader;
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set a a".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            },
         });
         let reply = node
             .handle_append_entries(AppendEntriesData {
@@ -505,7 +518,10 @@ mod tests {
         node.node_state.state = State::Follower;
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set a a".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            },
         });
         let reply = node
             .handle_append_entries(AppendEntriesData {
@@ -516,14 +532,23 @@ mod tests {
                 leader_id: "node2".to_string(),
                 entries: vec![LogEntry {
                     term: 2,
-                    command: "set b b".to_string(),
+                    command: Command::Set {
+                        key: "key2".to_string(),
+                        value: "val2".to_string(),
+                    },
                 }],
             })
             .await?;
         assert!(reply.success);
         assert_eq!(node.node_state.entries.len(), 2);
         assert_eq!(node.node_state.entries[1].term, 2);
-        assert_eq!(node.node_state.entries[1].command, "set b b");
+        assert_eq!(
+            node.node_state.entries[1].command,
+            Command::Set {
+                key: "key2".to_string(),
+                value: "val2".to_string(),
+            }
+        );
         assert_eq!(node.node_state.commit_index, 0);
         Ok(())
     }
@@ -546,11 +571,17 @@ mod tests {
         node.node_state.state = State::Follower;
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set a a".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 2,
-            command: "set b b".to_string(),
+            command: Command::Set {
+                key: "key2".to_string(),
+                value: "val2".to_string(),
+            },
         });
         let reply = node
             .handle_append_entries(AppendEntriesData {
@@ -561,14 +592,23 @@ mod tests {
                 leader_id: "node2".to_string(),
                 entries: vec![LogEntry {
                     term: 3,
-                    command: "set c c".to_string(),
+                    command: Command::Set {
+                        key: "key3".to_string(),
+                        value: "val3".to_string(),
+                    },
                 }],
             })
             .await?;
         assert!(reply.success);
         assert_eq!(node.node_state.entries.len(), 2);
         assert_eq!(node.node_state.entries[1].term, 3);
-        assert_eq!(node.node_state.entries[1].command, "set c c");
+        assert_eq!(
+            node.node_state.entries[1].command,
+            Command::Set {
+                key: "key3".to_string(),
+                value: "val3".to_string(),
+            }
+        );
         assert_eq!(node.node_state.commit_index, 0);
         Ok(())
     }
@@ -592,11 +632,17 @@ mod tests {
         node.node_state.state = State::Follower;
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set a a".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 2,
-            command: "set b b".to_string(),
+            command: Command::Set {
+                key: "key2".to_string(),
+                value: "val2".to_string(),
+            },
         });
         let reply = node
             .handle_append_entries(AppendEntriesData {
@@ -632,11 +678,17 @@ mod tests {
         node.node_state.state = State::Follower;
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set a a".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 2,
-            command: "set b b".to_string(),
+            command: Command::Set {
+                key: "key2".to_string(),
+                value: "val2".to_string(),
+            },
         });
         let reply = node
             .handle_append_entries(AppendEntriesData {
@@ -673,11 +725,17 @@ mod tests {
         node.node_state.state = State::Follower;
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set a a".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 2,
-            command: "set b b".to_string(),
+            command: Command::Set {
+                key: "key2".to_string(),
+                value: "val2".to_string(),
+            },
         });
         let reply = node
             .handle_append_entries(AppendEntriesData {
@@ -688,14 +746,23 @@ mod tests {
                 leader_id: "node2".to_string(),
                 entries: vec![LogEntry {
                     term: 3,
-                    command: "set c c".to_string(),
+                    command: Command::Set {
+                        key: "key3".to_string(),
+                        value: "val3".to_string(),
+                    },
                 }],
             })
             .await?;
         assert!(reply.success);
         assert_eq!(node.node_state.entries.len(), 3);
         assert_eq!(node.node_state.entries[2].term, 3);
-        assert_eq!(node.node_state.entries[2].command, "set c c");
+        assert_eq!(
+            node.node_state.entries[2].command,
+            Command::Set {
+                key: "key3".to_string(),
+                value: "val3".to_string(),
+            }
+        );
         assert_eq!(node.node_state.commit_index, 3);
         Ok(())
     }
@@ -811,19 +878,31 @@ mod tests {
         node.node_state.state = State::Leader;
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set a a".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 2,
-            command: "set b b".to_string(),
+            command: Command::Set {
+                key: "key2".to_string(),
+                value: "val2".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set c c".to_string(),
+            command: Command::Set {
+                key: "key3".to_string(),
+                value: "val3".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 2,
-            command: "set d d".to_string(),
+            command: Command::Set {
+                key: "key4".to_string(),
+                value: "val4".to_string(),
+            },
         });
         node.handle_append_entries_reply(AppendEntriesReplyData {
             term: 2,
@@ -855,19 +934,31 @@ mod tests {
         node.node_state.state = State::Leader;
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set a a".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 2,
-            command: "set b b".to_string(),
+            command: Command::Set {
+                key: "key2".to_string(),
+                value: "val2".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set c c".to_string(),
+            command: Command::Set {
+                key: "key3".to_string(),
+                value: "val3".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 2,
-            command: "set d d".to_string(),
+            command: Command::Set {
+                key: "key4".to_string(),
+                value: "val4".to_string(),
+            },
         });
         node.handle_append_entries_reply(AppendEntriesReplyData {
             term: 2,

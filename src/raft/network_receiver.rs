@@ -68,7 +68,16 @@ impl Raft for RaftService {
                 .iter()
                 .map(|e| LogEntry {
                     term: e.term,
-                    command: e.command.clone(),
+                    command: match e.command.clone().expect("no command").kind {
+                        Some(super::proto::command::Kind::Set(super::proto::Set {
+                            key,
+                            value,
+                        })) => super::raft_types::Command::Set { key, value },
+                        Some(super::proto::command::Kind::Delete(super::proto::Delete { key })) => {
+                            super::raft_types::Command::Delete { key }
+                        }
+                        None => panic!("log entry without command"),
+                    },
                 })
                 .collect(),
         };

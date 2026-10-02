@@ -279,7 +279,9 @@ mod tests {
         PreloadedMockWal, TestPersister, encoded_applied, encoded_log, record_count,
     };
     use crate::raft::node::utils::{RandGen, SystemClock};
-    use crate::raft::raft_types::{AppendEntriesData, RequestVoteData, RequestVoteReplyData};
+    use crate::raft::raft_types::{
+        AppendEntriesData, Command, RequestVoteData, RequestVoteReplyData,
+    };
     use crate::raft::state_persister::PersistentState;
     use crate::storage::lsm_tree::LSMTree as RealLSMTree;
 
@@ -303,8 +305,20 @@ mod tests {
             Box::new(RandGen),
             Box::new(SystemClock),
             Box::new(PreloadedMockWal(encoded_log(&[
-                (5, "set key1 val1"),
-                (7, "set key2 val2"),
+                (
+                    5,
+                    &Command::Set {
+                        key: "key1".to_string(),
+                        value: "val1".to_string(),
+                    },
+                ),
+                (
+                    7,
+                    &Command::Set {
+                        key: "key2".to_string(),
+                        value: "val2".to_string(),
+                    },
+                ),
             ]))),
         )
         .await?;
@@ -313,9 +327,21 @@ mod tests {
         assert_eq!(node.node_state.voted_for, Some("node3".to_string()));
         assert_eq!(node.node_state.entries.len(), 2);
         assert_eq!(node.node_state.entries[0].term, 5);
-        assert_eq!(node.node_state.entries[0].command, "set key1 val1");
+        assert_eq!(
+            node.node_state.entries[0].command,
+            Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            }
+        );
         assert_eq!(node.node_state.entries[1].term, 7);
-        assert_eq!(node.node_state.entries[1].command, "set key2 val2");
+        assert_eq!(
+            node.node_state.entries[1].command,
+            Command::Set {
+                key: "key2".to_string(),
+                value: "val2".to_string(),
+            }
+        );
         assert_eq!(node.node_state.commit_index, 2);
         Ok(())
     }
@@ -360,8 +386,20 @@ mod tests {
             Box::new(RandGen),
             Box::new(SystemClock),
             Box::new(PreloadedMockWal(encoded_log(&[
-                (1, "set key1 val1"),
-                (1, "set key2 val2"),
+                (
+                    1,
+                    &Command::Set {
+                        key: "key1".to_string(),
+                        value: "val1".to_string(),
+                    },
+                ),
+                (
+                    1,
+                    &Command::Set {
+                        key: "key2".to_string(),
+                        value: "val2".to_string(),
+                    },
+                ),
             ]))),
         )
         .await?;
@@ -399,8 +437,20 @@ mod tests {
             Box::new(RandGen),
             Box::new(SystemClock),
             Box::new(PreloadedMockWal(encoded_log(&[
-                (1, "set key1 val1"),
-                (1, "set key1 val2"),
+                (
+                    1,
+                    &Command::Set {
+                        key: "key1".to_string(),
+                        value: "val1".to_string(),
+                    },
+                ),
+                (
+                    1,
+                    &Command::Set {
+                        key: "key1".to_string(),
+                        value: "val2".to_string(),
+                    },
+                ),
             ]))),
         )
         .await?;
@@ -437,8 +487,20 @@ mod tests {
             Box::new(RandGen),
             Box::new(SystemClock),
             Box::new(PreloadedMockWal(encoded_log(&[
-                (1, "set key1 val1"),
-                (1, "set key2 val2"),
+                (
+                    1,
+                    &Command::Set {
+                        key: "key1".to_string(),
+                        value: "val1".to_string(),
+                    },
+                ),
+                (
+                    1,
+                    &Command::Set {
+                        key: "key2".to_string(),
+                        value: "val2".to_string(),
+                    },
+                ),
             ]))),
         )
         .await?;
@@ -471,8 +533,20 @@ mod tests {
             Box::new(RandGen),
             Box::new(SystemClock),
             Box::new(PreloadedMockWal(encoded_log(&[
-                (1, "set key1 val1"),
-                (1, "set key2 val2"),
+                (
+                    1,
+                    &Command::Set {
+                        key: "key1".to_string(),
+                        value: "val1".to_string(),
+                    },
+                ),
+                (
+                    1,
+                    &Command::Set {
+                        key: "key2".to_string(),
+                        value: "val2".to_string(),
+                    },
+                ),
             ]))),
         )
         .await?;
@@ -518,15 +592,24 @@ mod tests {
         node.node_state.commit_index = 3;
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set key1 val1".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set key2 val2".to_string(),
+            command: Command::Set {
+                key: "key2".to_string(),
+                value: "val2".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set key1 val3".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val3".to_string(),
+            },
         });
         let (snd1, rcv1) = tokio::sync::oneshot::channel::<ChangeStateReply>();
         let (snd2, rcv2) = tokio::sync::oneshot::channel::<ChangeStateReply>();
@@ -567,20 +650,32 @@ mod tests {
         node.node_state.commit_index = 3;
         node.node_state.last_applied = 1;
         node.state_machine
-            .apply("set key1 val1".to_string())
+            .apply(Command::Set {
+                key: "key1".to_string(),
+                value: "val1".to_string(),
+            })
             .await
             .unwrap();
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set key1 val3".to_string(),
+            command: Command::Set {
+                key: "key1".to_string(),
+                value: "val3".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set key2 val2".to_string(),
+            command: Command::Set {
+                key: "key2".to_string(),
+                value: "val2".to_string(),
+            },
         });
         node.node_state.entries.push(LogEntry {
             term: 1,
-            command: "set key3 val3".to_string(),
+            command: Command::Set {
+                key: "key3".to_string(),
+                value: "val3".to_string(),
+            },
         });
 
         let (snd2, rcv2) = tokio::sync::oneshot::channel::<ChangeStateReply>();
