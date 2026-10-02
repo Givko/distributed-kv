@@ -58,9 +58,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                 && self.get_log_term(append_request.prev_log_index) != append_request.prev_log_term)
         {
             if self.node_state.current_term < append_request.term {
-                self.node_state.state = State::Follower;
-                self.node_state.current_term = append_request.term;
-                self.node_state.voted_for = None;
+                self.step_down(append_request.term);
             }
 
             self.persist_state().await?;
