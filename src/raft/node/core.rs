@@ -52,7 +52,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
         node.recover_log().await?;
 
         node.node_state.commit_index = init_node_state.commit_index;
-        let _ = node.state_machine.recover().await;
+        node.state_machine.recover().await?;
         node.node_state.last_applied = node.state_machine.last_applied_index();
 
         // Close the gap left by a crash between a Raft commit and the WAL flush:

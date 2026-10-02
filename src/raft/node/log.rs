@@ -30,9 +30,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     pub(super) async fn truncate_log(&mut self, index: usize) -> anyhow::Result<()> {
         let bytes_to_keep: usize = self.node_state.entries[..index]
             .iter()
-            .map(|e| {
-                Encoder::encoded_len(&e.to_entry().expect("Failed to convert LogEntry to Entry"))
-            })
+            .map(|e| Encoder::encoded_len(&e.to_entry()))
             .sum();
 
         self.entries_wal.truncate(bytes_to_keep).await?;
@@ -41,9 +39,7 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
     }
 
     pub(super) async fn append_entry(&mut self, entry: LogEntry) {
-        let wal_entry: Entry = entry
-            .to_entry()
-            .expect("Failed to convert LogEntry to Entry");
+        let wal_entry: Entry = entry.to_entry();
         let encoded_entry = Encoder::encode(&wal_entry);
         self.entries_wal
             .append(&encoded_entry)

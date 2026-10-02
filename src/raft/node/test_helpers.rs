@@ -66,7 +66,7 @@ pub(super) fn encoded_log(commands: &[(u64, &Command)]) -> Vec<u8> {
                 term: *term,
                 command: (*command).clone(),
             };
-            Encoder::encode(&entry.to_entry().expect("test command must parse"))
+            Encoder::encode(&entry.to_entry())
         })
         .collect()
 }

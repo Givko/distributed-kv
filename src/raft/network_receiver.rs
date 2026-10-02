@@ -57,29 +57,38 @@ impl Raft for RaftService {
     ) -> Result<Response<AppendEntriesReply>, Status> {
         let message = request.into_inner();
         let (snd, rcv) = tokio::sync::oneshot::channel::<AppendEntriesReplyData>();
+        let mut entries = Vec::<LogEntry>::new();
+        for entry in message.entries.iter() {
+            let log_entry = LogEntry {
+                term: entry.term,
+                command: match entry.command.clone() {
+                    Some(command) => match command.kind {
+                        Some(super::proto::command::Kind::Set(set)) => {
+                            super::raft_types::Command::Set {
+                                key: set.key.clone(),
+                                value: set.value.clone(),
+                            }
+                        }
+                        Some(super::proto::command::Kind::Delete(delete)) => {
+                            super::raft_types::Command::Delete {
+                                key: delete.key.clone(),
+                            }
+                        }
+                        None => return Err(Status::invalid_argument("Missing command kind")),
+                    },
+                    None => return Err(Status::invalid_argument("Log entry without command")),
+                },
+            };
+            entries.push(log_entry);
+        }
+
         let append_entries_daata = AppendEntriesData {
             term: message.term,
             prev_log_index: message.prev_log_index,
             prev_log_term: message.prev_log_term,
             leader_commit: message.leader_commit,
             leader_id: message.leader_id.clone(),
-            entries: message
-                .entries
-                .iter()
-                .map(|e| LogEntry {
-                    term: e.term,
-                    command: match e.command.clone().expect("no command").kind {
-                        Some(super::proto::command::Kind::Set(super::proto::Set {
-                            key,
-                            value,
-                        })) => super::raft_types::Command::Set { key, value },
-                        Some(super::proto::command::Kind::Delete(super::proto::Delete { key })) => {
-                            super::raft_types::Command::Delete { key }
-                        }
-                        None => panic!("log entry without command"),
-                    },
-                })
-                .collect(),
+            entries,
         };
         let append_message = RaftMsg::AppendEntries {
             append_request: append_entries_daata,
