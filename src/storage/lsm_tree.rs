@@ -54,7 +54,7 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
     }
 
     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) {
-        let set_entry = Entry::set(self.next_index, key.clone(), value.clone());
+        let set_entry = Entry::set(self.next_index, &key, &value);
         let encoded = Encoder::encode(&set_entry);
         self.wal
             .append(&encoded)
@@ -65,7 +65,7 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
     }
 
     async fn delete(&mut self, key: &[u8]) -> bool {
-        let delete_entry = Entry::delete(self.next_index, key.to_vec());
+        let delete_entry = Entry::delete(self.next_index, key);
         let encoded = Encoder::encode(&delete_entry);
         self.wal
             .append(&encoded)
@@ -83,11 +83,11 @@ impl<W: WalStorage> StorageEngine for LSMTree<W> {
                 let entries = Encoder::decode_all(&data)?;
                 for entry in entries {
                     let memtable_entry = match entry.op {
-                        OP_SET => MemTableEntry::Value(entry.value),
+                        OP_SET => MemTableEntry::Value(entry.value.to_vec()),
                         OP_DELETE => MemTableEntry::Tombstone,
                         _ => continue,
                     };
-                    self.memtable.insert(entry.key, memtable_entry);
+                    self.memtable.insert(entry.key.to_vec(), memtable_entry);
                     self.next_index += 1;
                 }
                 Ok(())
@@ -115,14 +115,64 @@ mod tests {
     use std::io;
     use std::sync::Mutex;
 
+    /// Owned mirror of `WalEntry`. The mock outlives every buffer passed to
+    /// `append`, so it cannot hold entries that borrow from one.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RecordedEntry {
+        index: u64,
+        op: u8,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    }
+
+    impl RecordedEntry {
+        fn set(index: u64, key: &[u8], value: &[u8]) -> Self {
+            Self {
+                index,
+                op: OP_SET,
+                key: key.to_vec(),
+                value: value.to_vec(),
+            }
+        }
+
+        fn delete(index: u64, key: &[u8]) -> Self {
+            Self {
+                index,
+                op: OP_DELETE,
+                key: key.to_vec(),
+                value: Vec::new(),
+            }
+        }
+
+        fn encode(&self) -> Vec<u8> {
+            Encoder::encode(&WalEntry {
+                index: self.index,
+                op: self.op,
+                key: &self.key,
+                value: &self.value,
+            })
+        }
+    }
+
+    impl From<WalEntry<'_>> for RecordedEntry {
+        fn from(entry: WalEntry<'_>) -> Self {
+            Self {
+                index: entry.index,
+                op: entry.op,
+                key: entry.key.to_vec(),
+                value: entry.value.to_vec(),
+            }
+        }
+    }
+
     /// A WAL mock that records every written entry and replays them on `read_all`.
     #[derive(Default)]
     struct RecordingWal {
-        entries: Mutex<Vec<WalEntry>>,
+        entries: Mutex<Vec<RecordedEntry>>,
     }
 
     impl RecordingWal {
-        fn recorded(&self) -> Vec<WalEntry> {
+        fn recorded(&self) -> Vec<RecordedEntry> {
             self.entries.lock().unwrap().clone()
         }
     }
@@ -130,9 +180,12 @@ mod tests {
     #[async_trait::async_trait]
     impl WalStorage for RecordingWal {
         async fn append(&mut self, data: &[u8]) -> io::Result<()> {
-            let mut entries = Encoder::decode_all(data)
+            let entries = Encoder::decode_all(data)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            self.entries.lock().unwrap().append(&mut entries);
+            self.entries
+                .lock()
+                .unwrap()
+                .extend(entries.into_iter().map(RecordedEntry::from));
             Ok(())
         }
 
@@ -142,7 +195,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .flat_map(Encoder::encode)
+                .flat_map(RecordedEntry::encode)
                 .collect())
         }
         async fn truncate(&mut self, _len: usize) -> io::Result<()> {
@@ -239,8 +292,8 @@ mod tests {
         let wal = RecordingWal::default();
         // Pre-populate the WAL as if a previous run wrote these entries.
         wal.entries.lock().unwrap().extend([
-            WalEntry::set(0, b"k1".to_vec(), b"v1".to_vec()),
-            WalEntry::set(1, b"k2".to_vec(), b"v2".to_vec()),
+            RecordedEntry::set(0, b"k1", b"v1"),
+            RecordedEntry::set(1, b"k2", b"v2"),
         ]);
         let mut tree = LSMTree::with_wal(wal);
         let _ = tree.recover().await;
@@ -258,8 +311,8 @@ mod tests {
     async fn test_recover_replays_tombstone_hides_key() {
         let wal = RecordingWal::default();
         wal.entries.lock().unwrap().extend([
-            WalEntry::set(0, b"k".to_vec(), b"v".to_vec()),
-            WalEntry::delete(1, b"k".to_vec()),
+            RecordedEntry::set(0, b"k", b"v"),
+            RecordedEntry::delete(1, b"k"),
         ]);
         let mut tree = LSMTree::with_wal(wal);
         let _ = tree.recover().await;
@@ -271,8 +324,8 @@ mod tests {
     async fn test_recover_last_set_wins_over_earlier_set() {
         let wal = RecordingWal::default();
         wal.entries.lock().unwrap().extend([
-            WalEntry::set(0, b"k".to_vec(), b"v1".to_vec()),
-            WalEntry::set(1, b"k".to_vec(), b"v2".to_vec()),
+            RecordedEntry::set(0, b"k", b"v1"),
+            RecordedEntry::set(1, b"k", b"v2"),
         ]);
         let mut tree = LSMTree::with_wal(wal);
         let _ = tree.recover().await;
@@ -286,9 +339,9 @@ mod tests {
     async fn test_recover_set_after_tombstone_is_visible() {
         let wal = RecordingWal::default();
         wal.entries.lock().unwrap().extend([
-            WalEntry::set(0, b"k".to_vec(), b"v1".to_vec()),
-            WalEntry::delete(1, b"k".to_vec()),
-            WalEntry::set(2, b"k".to_vec(), b"v2".to_vec()),
+            RecordedEntry::set(0, b"k", b"v1"),
+            RecordedEntry::delete(1, b"k"),
+            RecordedEntry::set(2, b"k", b"v2"),
         ]);
         let mut tree = LSMTree::with_wal(wal);
         let _ = tree.recover().await;
@@ -345,9 +398,9 @@ mod tests {
     async fn test_last_applied_index_restored_after_recover() {
         let wal = RecordingWal::default();
         wal.entries.lock().unwrap().extend([
-            WalEntry::set(0, b"k1".to_vec(), b"v1".to_vec()),
-            WalEntry::set(1, b"k2".to_vec(), b"v2".to_vec()),
-            WalEntry::delete(2, b"k1".to_vec()),
+            RecordedEntry::set(0, b"k1", b"v1"),
+            RecordedEntry::set(1, b"k2", b"v2"),
+            RecordedEntry::delete(2, b"k1"),
         ]);
         let mut tree = LSMTree::with_wal(wal);
         let _ = tree.recover().await;

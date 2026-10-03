@@ -8,17 +8,10 @@ pub struct LogEntry {
 }
 
 impl LogEntry {
-    /// Maps this entry onto the WAL record layout so the Raft log can be
-    /// persisted with the same `Encoder` as the storage engine: the term
-    /// becomes the record index and the command is split into op/key/value.
-    pub fn to_entry(&self) -> Entry {
-        match self.command.clone() {
-            Command::Set { key, value } => Entry::set(
-                self.term,
-                key.as_bytes().to_vec(),
-                value.as_bytes().to_vec(),
-            ),
-            Command::Delete { key } => Entry::delete(self.term, key.as_bytes().to_vec()),
+    pub fn to_entry(&self) -> Entry<'_> {
+        match &self.command {
+            Command::Set { key, value } => Entry::set(self.term, key.as_bytes(), value.as_bytes()),
+            Command::Delete { key } => Entry::delete(self.term, key.as_bytes()),
         }
     }
 }
@@ -144,10 +137,7 @@ mod tests {
             },
         };
 
-        assert_eq!(
-            log_entry.to_entry(),
-            Entry::set(1, b"key1".to_vec(), b"val1".to_vec())
-        );
+        assert_eq!(log_entry.to_entry(), Entry::set(1, b"key1", b"val1"));
     }
 
     #[test]

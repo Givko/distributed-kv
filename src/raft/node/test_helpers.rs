@@ -80,11 +80,7 @@ pub(super) fn encoded_applied(writes: &[(&str, &str)]) -> Vec<u8> {
         .iter()
         .enumerate()
         .flat_map(|(index, (key, value))| {
-            Encoder::encode(&Entry::set(
-                index as u64,
-                key.as_bytes().to_vec(),
-                value.as_bytes().to_vec(),
-            ))
+            Encoder::encode(&Entry::set(index as u64, key.as_bytes(), value.as_bytes()))
         })
         .collect()
 }

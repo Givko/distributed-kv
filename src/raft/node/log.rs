@@ -57,14 +57,14 @@ impl<T: Persister + Send + Sync, SM: StorageEngine> Node<T, SM> {
                         OP_SET => self.node_state.entries.push(LogEntry {
                             term: entry.index,
                             command: Command::Set {
-                                key: String::from_utf8_lossy(&entry.key).to_string(),
-                                value: String::from_utf8_lossy(&entry.value).to_string(),
+                                key: String::from_utf8_lossy(entry.key).to_string(),
+                                value: String::from_utf8_lossy(entry.value).to_string(),
                             },
                         }),
                         OP_DELETE => self.node_state.entries.push(LogEntry {
                             term: entry.index,
                             command: Command::Delete {
-                                key: String::from_utf8_lossy(&entry.key).to_string(),
+                                key: String::from_utf8_lossy(entry.key).to_string(),
                             },
                         }),
                         _ => Err(anyhow::anyhow!(
@@ -119,8 +119,8 @@ mod tests {
         let bogus = Encoder::encode(&Entry {
             index: 3,
             op: 99,
-            key: b"key1".to_vec(),
-            value: b"val1".to_vec(),
+            key: b"key1",
+            value: b"val1",
         });
 
         let error = match recover_from(bogus).await {
@@ -146,8 +146,8 @@ mod tests {
         wal.extend(Encoder::encode(&Entry {
             index: 2,
             op: 42,
-            key: b"key2".to_vec(),
-            value: Vec::new(),
+            key: b"key2",
+            value: &[],
         }));
 
         assert!(recover_from(wal).await.is_err());

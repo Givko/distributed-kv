@@ -8,7 +8,7 @@ const LEN_PREFIX_SIZE: usize = 4;
 pub struct Encoder;
 
 impl Encoder {
-    pub fn decode(data: &[u8]) -> io::Result<(Entry, u64)> {
+    pub fn decode(data: &[u8]) -> io::Result<(Entry<'_>, u64)> {
         //binary format is [index (8 bytes)][op (1 byte)][key length (4 bytes)][key][value length (4 bytes)][value]
         let mut cursor = 0;
         if cursor + 8 > data.len() {
@@ -40,7 +40,7 @@ impl Encoder {
                 "Corrupted WAL entry key",
             ));
         }
-        let key = data[cursor..cursor + key_len].to_vec();
+        let key = &data[cursor..cursor + key_len];
         cursor += key_len;
         if cursor + 4 > data.len() {
             return Err(Error::new(
@@ -56,7 +56,7 @@ impl Encoder {
                 "Corrupted WAL entry value",
             ));
         }
-        let value = data[cursor..cursor + value_len].to_vec();
+        let value = &data[cursor..cursor + value_len];
         cursor += value_len;
         Ok((
             Entry {
@@ -77,9 +77,9 @@ impl Encoder {
         let index = entry.index.to_be_bytes();
         let op = entry.op;
         let key_len_bytes = key_len.to_be_bytes();
-        let key = &entry.key;
+        let key = entry.key;
         let value_len_bytes = value_len.to_be_bytes();
-        let value = &entry.value;
+        let value = entry.value;
         // The prefix counts the record body, so it excludes the prefix itself.
         let len = (encoded_len - LEN_PREFIX_SIZE) as u32;
 
@@ -101,7 +101,7 @@ impl Encoder {
         LEN_PREFIX_SIZE + 8 + 1 + 4 + entry.key.len() + 4 + entry.value.len()
     }
 
-    pub fn decode_all(data: &[u8]) -> io::Result<Vec<Entry>> {
+    pub fn decode_all(data: &[u8]) -> io::Result<Vec<Entry<'_>>> {
         let mut entries = Vec::new();
         let mut cursor = 0;
         while cursor < data.len() {
@@ -149,10 +149,10 @@ mod tests {
     #[test]
     fn test_encoded_len_matches_encode() {
         let entries = [
-            Entry::set(1, b"a".to_vec(), b"x".to_vec()),
-            Entry::delete(2, b"bb".to_vec()),
-            Entry::set(3, Vec::new(), Vec::new()),
-            Entry::set(4, b"longer_key".to_vec(), b"longer_value".to_vec()),
+            Entry::set(1, b"a", b"x"),
+            Entry::delete(2, b"bb"),
+            Entry::set(3, &[], &[]),
+            Entry::set(4, b"longer_key", b"longer_value"),
         ];
 
         for entry in entries {
@@ -279,9 +279,9 @@ mod tests {
         bytes.extend_from_slice(&body3);
         let entries = Encoder::decode_all(&bytes).unwrap();
         assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0], Entry::set(1, b"a".to_vec(), b"x".to_vec()));
-        assert_eq!(entries[1], Entry::delete(2, b"b".to_vec()));
-        assert_eq!(entries[2], Entry::set(3, b"c".to_vec(), b"yz".to_vec()));
+        assert_eq!(entries[0], Entry::set(1, b"a", b"x"));
+        assert_eq!(entries[1], Entry::delete(2, b"b"));
+        assert_eq!(entries[2], Entry::set(3, b"c", b"yz"));
     }
 
     #[tokio::test]
@@ -306,9 +306,9 @@ mod tests {
     #[tokio::test]
     async fn test_decode_all_with_encode() {
         let entries = vec![
-            Entry::set(1, b"foo".to_vec(), b"bar".to_vec()),
-            Entry::delete(2, b"baz".to_vec()),
-            Entry::set(3, b"x".to_vec(), b"y".to_vec()),
+            Entry::set(1, b"foo", b"bar"),
+            Entry::delete(2, b"baz"),
+            Entry::set(3, b"x", b"y"),
         ];
         let mut bytes = Vec::new();
         for entry in &entries {
@@ -320,7 +320,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_decode_with_encode() {
-        let entry = Entry::set(42, b"abc".to_vec(), b"defg".to_vec());
+        let entry = Entry::set(42, b"abc", b"defg");
         let bytes = Encoder::encode(&entry);
         let decoded = Encoder::decode_all(&bytes).unwrap();
         assert_eq!(decoded.len(), 1);
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_encode_is_deterministic() {
-        let entry = Entry::set(1, b"key".to_vec(), b"val".to_vec());
+        let entry = Entry::set(1, b"key", b"val");
 
         assert_eq!(
             Encoder::encode(&entry),
@@ -341,9 +341,9 @@ mod tests {
     #[test]
     fn test_encode_accumulated_offsets_are_correct() {
         let entries = vec![
-            Entry::set(1, b"a".to_vec(), b"x".to_vec()),
-            Entry::set(2, b"bb".to_vec(), b"yy".to_vec()),
-            Entry::set(3, b"ccc".to_vec(), b"zzz".to_vec()),
+            Entry::set(1, b"a", b"x"),
+            Entry::set(2, b"bb", b"yy"),
+            Entry::set(3, b"ccc", b"zzz"),
         ];
         let mut buf = Vec::new();
         let mut offset: u64 = 0;

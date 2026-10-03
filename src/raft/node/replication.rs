@@ -236,12 +236,10 @@ mod tests {
         .await?;
 
         // The entry itself is durable in the WAL now, not in the persisted state.
-        let entries = Encoder::decode_all(&wal_data.lock().unwrap())?;
+        let wal_bytes = wal_data.lock().unwrap();
+        let entries = Encoder::decode_all(&wal_bytes)?;
         assert_eq!(entries.len(), 1);
-        assert_eq!(
-            entries[0],
-            Entry::set(3, b"key1".to_vec(), b"value1".to_vec())
-        );
+        assert_eq!(entries[0], Entry::set(3, b"key1", b"value1"));
 
         // The persister still carries the term and the advanced commit index.
         let persisted = saved_state.lock().unwrap();
