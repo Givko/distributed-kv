@@ -70,41 +70,35 @@ impl Encoder {
     }
 
     pub fn encode(entry: &Entry) -> Vec<u8> {
-        let mut encoded = Vec::with_capacity(Self::encoded_len(entry));
-        Self::encode_into(entry, &mut encoded);
-        encoded
-    }
-
-    /// Total bytes `encode` produces for `entry`, length prefix included.
-    /// Single source of truth for the record size -- `encode_into` derives
-    /// both its prefix and its return value from this.
-    pub fn encoded_len(entry: &Entry) -> usize {
-        LEN_PREFIX_SIZE + 8 + 1 + 4 + entry.key.len() + 4 + entry.value.len()
-    }
-
-    // Returns the number of bytes written
-    pub(super) fn encode_into(entry: &Entry, bytes: &mut Vec<u8>) -> usize {
+        let encoded_len = Self::encoded_len(entry);
+        let mut bytes = Vec::with_capacity(encoded_len);
         let key_len = entry.key.len() as u32;
         let value_len = entry.value.len() as u32;
         let index = entry.index.to_be_bytes();
-        let op = &entry.op;
+        let op = entry.op;
         let key_len_bytes = key_len.to_be_bytes();
         let key = &entry.key;
         let value_len_bytes = value_len.to_be_bytes();
         let value = &entry.value;
-        let encoded_len = Self::encoded_len(entry);
         // The prefix counts the record body, so it excludes the prefix itself.
         let len = (encoded_len - LEN_PREFIX_SIZE) as u32;
 
-        bytes.extend_from_slice(&len.to_be_bytes());
-        bytes.extend_from_slice(&index);
-        bytes.push(*op);
-        bytes.extend_from_slice(&key_len_bytes);
-        bytes.extend_from_slice(key);
-        bytes.extend_from_slice(&value_len_bytes);
-        bytes.extend_from_slice(value);
+        bytes.extend(len.to_be_bytes());
+        bytes.extend(index);
+        bytes.push(op);
+        bytes.extend(key_len_bytes);
+        bytes.extend(key);
+        bytes.extend(value_len_bytes);
+        bytes.extend(value);
 
-        encoded_len
+        bytes
+    }
+
+    /// Total bytes `encode` produces for `entry`, length prefix included.
+    /// Single source of truth for the record size -- `encode` derives both its
+    /// length prefix and its buffer capacity from this.
+    pub fn encoded_len(entry: &Entry) -> usize {
+        LEN_PREFIX_SIZE + 8 + 1 + 4 + entry.key.len() + 4 + entry.value.len()
     }
 
     pub fn decode_all(data: &[u8]) -> io::Result<Vec<Entry>> {
@@ -119,9 +113,8 @@ impl Encoder {
                 ));
             }
 
-            let len = u32::from_be_bytes(
-                data[cursor..cursor + LEN_PREFIX_SIZE].try_into().unwrap(),
-            ) as usize;
+            let len = u32::from_be_bytes(data[cursor..cursor + LEN_PREFIX_SIZE].try_into().unwrap())
+                as usize;
             cursor += LEN_PREFIX_SIZE;
             if cursor + len > data.len() {
                 return Err(Error::new(
@@ -335,39 +328,18 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_into_returns_bytes_written_not_buffer_len() {
+    fn test_encode_is_deterministic() {
         let entry = Entry::set(1, b"key".to_vec(), b"val".to_vec());
-        let mut buf = Vec::new();
 
-        let written1 = Encoder::encode_into(&entry, &mut buf);
-        assert_eq!(written1, buf.len(), "first call should match buffer length");
-
-        let len_before = buf.len();
-        let written2 = Encoder::encode_into(&entry, &mut buf);
-        let actual_bytes_added = buf.len() - len_before;
         assert_eq!(
-            written2, actual_bytes_added,
-            "second call should return only the bytes it wrote, not the total buffer length"
+            Encoder::encode(&entry),
+            Encoder::encode(&entry),
+            "encode should produce the same bytes for the same entry"
         );
     }
 
     #[test]
-    fn test_encode_into_returns_same_as_encode_len() {
-        let entries = vec![
-            Entry::set(1, b"a".to_vec(), b"x".to_vec()),
-            Entry::set(2, b"longer_key".to_vec(), b"longer_value".to_vec()),
-            Entry::delete(3, b"del".to_vec()),
-        ];
-        for entry in &entries {
-            let standalone = Encoder::encode(entry);
-            let mut buf = Vec::new();
-            let written = Encoder::encode_into(entry, &mut buf);
-            assert_eq!(written, standalone.len());
-        }
-    }
-
-    #[test]
-    fn test_encode_into_accumulated_offsets_are_correct() {
+    fn test_encode_accumulated_offsets_are_correct() {
         let entries = vec![
             Entry::set(1, b"a".to_vec(), b"x".to_vec()),
             Entry::set(2, b"bb".to_vec(), b"yy".to_vec()),
@@ -379,8 +351,9 @@ mod tests {
 
         for entry in &entries {
             recorded_offsets.push(offset);
-            let written = Encoder::encode_into(entry, &mut buf);
-            offset += written as u64;
+            let encoded = Encoder::encode(entry);
+            offset += encoded.len() as u64;
+            buf.extend_from_slice(&encoded);
         }
 
         // Each recorded offset should be the start of that entry in the buffer.
